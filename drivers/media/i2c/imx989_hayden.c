@@ -7,6 +7,7 @@
  */
 
 //#define DEBUG
+#include "media/v4l2-mediabus.h"
 #include <linux/clk.h>
 #include <linux/device.h>
 #include <linux/delay.h>
@@ -40,59 +41,48 @@
 #define V4L2_CID_DIGITAL_GAIN		V4L2_CID_GAIN
 #endif
 
-#define IMX989_LINK_FREQ_400		400000000	// 800Mbps per lane
-#define IMX989_LINK_FREQ_625		625000000	// 1250Mbps per lane
+#define IMX989_MIPI_FREQ_356M			356000000
+#define IMX989_MIPI_FREQ_384M			384000000
+#define IMX989_MIPI_FREQ_750M			750000000
+#define IMX989_MIPI_FREQ_1250M			1250000000
 
-#define IMX989_LANES			4
+#define IMX989_LANES			3
 
-#define PIXEL_RATE_WITH_848M_10BIT	(IMX989_LINK_FREQ_400 * 2 / 10 * 4)
-#define PIXEL_RATE_WITH_848M_12BIT	(IMX989_LINK_FREQ_400 * 2 / 12 * 4)
+#define PIXEL_RATE_WITH_1250M_10BIT	((u64)IMX989_MIPI_FREQ_356M * 2  * 4 / 10)
+#define PIXEL_RATE_WITH_1250M_12BIT	((u64)IMX989_MIPI_FREQ_356M * 2  * 4 / 12)
 
-#define IMX989_XVCLK_FREQ		24000000
+#define IMX989_XVCLK_FREQ		19200000
 
 #define CHIP_ID				0x0989
 #define IMX989_REG_CHIP_ID_H		0x0016
 #define IMX989_REG_CHIP_ID_L		0x0017
 
-#define IMX989_REG_CTRL_MODE		0x0100
+#define IMX989_REG_CTRL_MODE		0x0100 //ok for 989
 #define IMX989_MODE_SW_STANDBY		0x0
 #define IMX989_MODE_STREAMING		0x1
 
-#define IMX989_REG_EXPOSURE_H		0x0202
+#define IMX989_REG_EXPOSURE_H		0x0202 //ok for 989, coarse integration time.
 #define IMX989_REG_EXPOSURE_L		0x0203
 #define IMX989_EXPOSURE_MIN		2
 #define IMX989_EXPOSURE_STEP		1
-#define IMX989_VTS_MAX			0x7fff
+#define IMX989_VTS_MAX			0xffff
 
-#define IMX989_REG_GAIN_H		0x0204
+#define IMX989_REG_GAIN_H		0x0204 //ok for 989, analog gain value for long exposure frame
 #define IMX989_REG_GAIN_L		0x0205
 #define IMX989_GAIN_MIN			0x10
 #define IMX989_GAIN_MAX			0x400
 #define IMX989_GAIN_STEP		1
-#define IMX989_GAIN_DEFAULT		0x80
-
-#define IMX989_REG_DGAIN		0x3130
-#define IMX989_DGAIN_MODE		BIT(0)
-#define IMX989_REG_DGAINGR_H		0x020e
-#define IMX989_REG_DGAINGR_L		0x020f
-#define IMX989_REG_DGAINR_H		0x0210
-#define IMX989_REG_DGAINR_L		0x0211
-#define IMX989_REG_DGAINB_H		0x0212
-#define IMX989_REG_DGAINB_L		0x0213
-#define IMX989_REG_DGAINGB_H		0x0214
-#define IMX989_REG_DGAINGB_L		0x0215
-#define IMX989_REG_GAIN_GLOBAL_H	0x3ffc
-#define IMX989_REG_GAIN_GLOBAL_L	0x3ffd
+#define IMX989_GAIN_DEFAULT		0x10
 
 //#define IMX989_REG_TEST_PATTERN_H	0x0600
 #define IMX989_REG_TEST_PATTERN	0x0601
 #define IMX989_TEST_PATTERN_ENABLE	0x1
 #define IMX989_TEST_PATTERN_DISABLE	0x0
 
-#define IMX989_REG_VTS_H		0x0340
+#define IMX989_REG_VTS_H		0x0340 //ok for 989, length of frame 
 #define IMX989_REG_VTS_L		0x0341
 
-#define IMX989_FLIP_MIRROR_REG		0x0101
+#define IMX989_FLIP_MIRROR_REG		0x0101 //ok for 989, orientation for vertical
 #define IMX989_MIRROR_BIT_MASK		BIT(0)
 #define IMX989_FLIP_BIT_MASK		BIT(1)
 
@@ -154,6 +144,7 @@ struct imx989_mode {
 	u32 hdr_mode;
 	u32 mipi_freq_idx;
 	const struct other_data *spd;
+	const struct other_data *ebd;
 	u32 vc[PAD_MAX];
 };
 
@@ -198,680 +189,666 @@ struct imx989 {
 	u8			flip;
 	struct otp_info		*otp;
 	u32			spd_id;
+	u32			ebd_id;
+	struct v4l2_fwnode_endpoint bus_cfg;
 };
 
 #define to_imx989(sd) container_of(sd, struct imx989, subdev)
 
-/*
- *IMX989LQR All-pixel scan CSI-2_4lane 24Mhz
- *AD:10bit Output:10bit 1696Mbps Master Mode 30fps
- *
- */
-static const struct regval imx989_linear_10bit_global_regs[] = {
-	/* External Clock Setting */
-	{0x0136, 0x18},
-	{0x0137, 0x00},
-	/* Register version */
-	{0x3C7E, 0x01},
-	{0x3C7F, 0x08},
+static const struct other_data imx989_spd = { //modified to 989, for pdaf 2048x768 L and R 
+	.width = 4096,
+	.height = 768,
+	.bus_fmt = MEDIA_BUS_FMT_SPD_2X8,
+	.data_type = 0x30,
+	.data_bit = 10,
+};
+static const struct other_data imx989_ebd = {
+	.width = 4096,
+	.height = 2,
+	.data_type = 0x12,
+	.bus_fmt = MEDIA_BUS_FMT_EBD_1X8,
+};
 
-	/* Signaling mode setting */
-	{0x0111, 0x02},
 
-	/*Global Setting*/
-	{0x380C, 0x00},
-	{0x3C00, 0x10},
-	{0x3C01, 0x10},
-	{0x3C02, 0x10},
-	{0x3C03, 0x10},
-	{0x3C04, 0x10},
-	{0x3C05, 0x01},
-	{0x3C06, 0x00},
-	{0x3C07, 0x00},
-	{0x3C08, 0x03},
-	{0x3C09, 0xFF},
-	{0x3C0A, 0x01},
-	{0x3C0B, 0x00},
-	{0x3C0C, 0x00},
-	{0x3C0D, 0x03},
-	{0x3C0E, 0xFF},
-	{0x3C0F, 0x20},
-	{0x3F88, 0x00},
-	{0x3F8E, 0x00},
-	{0x5282, 0x01},
-	{0x9004, 0x14},
-	{0x9200, 0xF4},
-	{0x9201, 0xA7},
-	{0x9202, 0xF4},
-	{0x9203, 0xAA},
-	{0x9204, 0xF4},
-	{0x9205, 0xAD},
-	{0x9206, 0xF4},
-	{0x9207, 0xB0},
-	{0x9208, 0xF4},
-	{0x9209, 0xB3},
-	{0x920A, 0xB7},
-	{0x920B, 0x34},
-	{0x920C, 0xB7},
-	{0x920D, 0x36},
-	{0x920E, 0xB7},
-	{0x920F, 0x37},
-	{0x9210, 0xB7},
-	{0x9211, 0x38},
-	{0x9212, 0xB7},
-	{0x9213, 0x39},
-	{0x9214, 0xB7},
-	{0x9215, 0x3A},
-	{0x9216, 0xB7},
-	{0x9217, 0x3C},
-	{0x9218, 0xB7},
-	{0x9219, 0x3D},
-	{0x921A, 0xB7},
-	{0x921B, 0x3E},
-	{0x921C, 0xB7},
-	{0x921D, 0x3F},
-	{0x921E, 0x77},
-	{0x921F, 0x77},
-	{0x9222, 0xC4},
-	{0x9223, 0x4B},
-	{0x9224, 0xC4},
-	{0x9225, 0x4C},
-	{0x9226, 0xC4},
-	{0x9227, 0x4D},
-	{0x9810, 0x14},
-	{0x9814, 0x14},
-	{0x99B2, 0x20},
-	{0x99B3, 0x0F},
-	{0x99B4, 0x0F},
-	{0x99B5, 0x0F},
-	{0x99B6, 0x0F},
-	{0x99E4, 0x0F},
-	{0x99E5, 0x0F},
-	{0x99E6, 0x0F},
-	{0x99E7, 0x0F},
-	{0x99E8, 0x0F},
-	{0x99E9, 0x0F},
-	{0x99EA, 0x0F},
-	{0x99EB, 0x0F},
-	{0x99EC, 0x0F},
-	{0x99ED, 0x0F},
-	{0xA569, 0x06},
-	{0xA679, 0x20},
-	{0xC020, 0x01},
-	{0xC61D, 0x00},
-	{0xC625, 0x00},
-	{0xC638, 0x03},
-	{0xC63B, 0x01},
-	{0xE286, 0x31},
-	{0xE2A6, 0x32},
-	{0xE2C6, 0x33},
-	{0xBCF1, 0x00},
-
-	/*Image Quality adjustment setting */
-	{0x9852, 0x00},
-	{0x9954, 0x0F},
-	{0xA7AD, 0x01},
-	{0xA7CB, 0x01},
-	{0xAE09, 0xFF},
-	{0xAE0A, 0xFF},
-	{0xAE12, 0x58},
-	{0xAE13, 0x58},
-	{0xAE15, 0x10},
-	{0xAE16, 0x10},
-	{0xAF05, 0x48},
-	{0xB07C, 0x02},
+static const struct regval imx989_init_regs[] = { //modified to 989!
+	// External Clock Setting
+	{0x0136, 0x13},
+	{0x0137, 0x33},
+	// PHY_VIF Setting
+	{0x3304, 0x00},
+	// Register version
+	{0x33F0, 0x07},
+	{0x33F1, 0x08},
+	// Signaling mode setting: cphy
+	{0x0111, 0x03},
+	// Global Setting
+	{0x316E, 0x00},
+	{0x3379, 0x00},
+	{0x3820, 0xBB},
+	{0x3821, 0xEE},
+	{0x3822, 0x01},
+	{0x3823, 0x03},
+	{0x3824, 0x07},
+	{0x39D1, 0x00},
+	{0x86A9, 0x60},
+	{0x9002, 0x08},
+	{0x9003, 0x08},
+	{0x9004, 0x10},
+	{0x90E4, 0x08},
+	{0x90E5, 0x08},
+	{0x90E6, 0x10},
+	{0x90E7, 0x01},
+	{0x9208, 0x31},
+	{0x9209, 0x31},
+	{0x920A, 0x42},
+	{0x920B, 0x73},
+	{0x923E, 0x4A},
+	{0x923F, 0x84},
+	{0x9240, 0x6F},
+	{0x9241, 0xF2},
+	{0x9242, 0x6F},
+	{0x9243, 0xF3},
+	{0x9244, 0x6F},
+	{0x9245, 0xF7},
+	{0x9246, 0x6F},
+	{0x9247, 0xFE},
+	{0x9248, 0x6F},
+	{0x9278, 0x89},
+	{0x9279, 0x98},
+	{0x927A, 0x88},
+	{0x927B, 0x8C},
+	{0x927C, 0x88},
+	{0x927D, 0x96},
+	{0x927E, 0x88},
+	{0x927F, 0x93},
+	{0xBCAF, 0x01},
+	{0xBD4E, 0xCD},
+	{0xBD4F, 0xC0},
+	{0xBD52, 0xD3},
+	{0xBD56, 0xD1},
+	{0xBD57, 0x40},
+	{0xBD62, 0xCF},
+	{0xBD63, 0x20},
+	{0xBD66, 0xCF},
+	{0xBD67, 0x20},
+	{0xBD6A, 0x9D},
+	{0xBD6B, 0x60},
+	{0xBD6E, 0x3F},
+	{0xBD6F, 0xE0},
+	{0xBD76, 0xCF},
+	{0xBD77, 0x20},
+	{0xBD7A, 0x9D},
+	{0xBD7B, 0x60},
+	{0xBD7E, 0xD0},
+	{0xBD7F, 0x60},
+	{0xBD82, 0xD2},
+	{0xBD83, 0x40},
+	{0xBD86, 0xB1},
+	{0xBD87, 0xC0},
+	{0xBD92, 0xD0},
+	{0xBD93, 0x60},
+	// Global Setting 2
+	{0x7533, 0x01},
+	{0xBA80, 0x01},
+	{0xBA9F, 0x0F},
+	{0xBAA6, 0x0D},
+	{0xBAAC, 0x0B},
+	{0xBAC0, 0x09},
+	{0xBAC6, 0x05},
+	{0xBAFF, 0x32},
+	{0xBB0D, 0x3C},
+	{0xBB19, 0x44},
+	{0xBB41, 0x4C},
+	{0xBB4D, 0x5B},
+	{0xBBAF, 0x73},
+	{0xBBBD, 0x7D},
+	{0xBBC9, 0x85},
+	{0xBBF1, 0x8D},
+	{0xBBFD, 0x9C},
+	{0xBC65, 0x5D},
+	{0xBC89, 0x6D},
+	{0xD1E0, 0x0F},
+	{0xD1E2, 0x0B},
+	{0xD1E5, 0x05},
+	{0xD205, 0x32},
+	{0xD20B, 0x44},
+	{0xD217, 0x5B},
+	{0xD231, 0x73},
+	{0xD237, 0x85},
+	{0xD243, 0x9C},
+	{0xD25D, 0x53},
+	{0xD263, 0x65},
+	{0xD26F, 0x7C},
+	{0xAAE4, 0xFF},
+	{0xAAE5, 0xFF},
+	{0xAAEC, 0x01},
+	{0xAAED, 0xE3},
+	{0xAAF4, 0xFF},
+	{0xAAF5, 0xFF},
+	{0xAAFC, 0x01},
+	{0xAAFD, 0xF1},
+	{0xAB04, 0xFF},
+	{0xAB05, 0xFF},
+	{0xAB0C, 0x02},
+	{0xAB0D, 0x02},
+	{0xAB14, 0xFF},
+	{0xAB15, 0xFF},
+	{0xAB1C, 0x02},
+	{0xAB1D, 0x02},
+	{0xAB24, 0xFF},
+	{0xAB25, 0xFF},
+	{0xAB34, 0xFF},
+	{0xAB35, 0xFF},
+	{0xAB44, 0xFF},
+	{0xAB45, 0xFF},
+	{0xAB4C, 0x01},
+	{0xAB4D, 0xF8},
+	{0xAB54, 0xFF},
+	{0xAB55, 0xFF},
+	{0xAB5C, 0x01},
+	{0xAB5D, 0xE9},
+	{0xAB64, 0xFF},
+	{0xAB65, 0xFF},
+	{0xAB6C, 0x02},
+	{0xAB6D, 0x0C},
+	{0xAB74, 0xFF},
+	{0xAB75, 0xFF},
+	{0xAB7C, 0x02},
+	{0xAB7D, 0x02},
+	{0xAB84, 0xFF},
+	{0xAB85, 0xFF},
+	{0xAB8C, 0x02},
+	{0xAB8D, 0x02},
+	{0xAB94, 0xFF},
+	{0xAB95, 0xFF},
+	{0xAB9C, 0x01},
+	{0xAB9D, 0xF8},
+	{0xABA4, 0xFF},
+	{0xABA5, 0xFF},
+	{0xABAC, 0x02},
+	{0xABAD, 0x0D},
+	{0x7533, 0x00},
+	// Global Setting 3
+	{0x7533, 0x01},
+	{0xBED4, 0x03},
+	{0xBED5, 0xE8},
+	{0x7533, 0x00},
+	// Global Setting 4
+	{0x7533, 0x01},
+	{0xB00A, 0x0D},
+	{0xB024, 0x0D},
+	{0xB2DB, 0x05},
+	{0xB34B, 0x12},
+	{0xB35B, 0x50},
+	{0xB360, 0x5C},
+	{0xB37F, 0x16},
+	{0xB39B, 0x0C},
+	{0xB3B7, 0x07},
+	{0xB3D3, 0x11},
+	{0xB3EF, 0x7F},
+	{0xB40B, 0x7F},
+	{0xB41B, 0x7F},
+	{0xB420, 0x7F},
+	{0xB7E9, 0x32},
+	{0xB821, 0x4B},
+	{0xB859, 0x3C},
+	{0xB891, 0x3C},
+	{0xB8C9, 0x50},
+	{0xB96F, 0x2D},
+	{0xB99B, 0x2D},
+	{0xBAEE, 0x07},
+	{0xBB1B, 0x24},
+	{0xBB35, 0x24},
+	{0xBB4F, 0x24},
+	{0xBBCB, 0x65},
+	{0xBBE5, 0x65},
+	{0xBBFF, 0x65},
+	{0xD154, 0x20},
+	{0xD155, 0x2D},
+	{0xD15D, 0x3A},
+	{0xD15F, 0x7F},
+	{0xD161, 0x7F},
+	{0xD162, 0x7F},
+	{0xD163, 0x7F},
+	{0xD1D6, 0x2D},
+	{0xD1D9, 0x2D},
+	{0xD1DC, 0x2D},
+	{0xD1EB, 0x07},
+	{0xD20D, 0x24},
+	{0xD213, 0x24},
+	{0xD219, 0x24},
+	{0xD239, 0x65},
+	{0xD23F, 0x65},
+	{0xD245, 0x65},
+	{0xD265, 0x45},
+	{0xD26B, 0x45},
+	{0xD271, 0x45},
+	{0x7533, 0x00},
+	// Global Setting 5
+	{0x7533, 0x01},
+	{0x97C8, 0xFF},
+	{0x97C9, 0xFF},
+	{0xB305, 0x05},
+	{0xB321, 0x0D},
+	{0xB33D, 0x10},
+	{0xB354, 0x50},
+	{0xB38D, 0x7F},
+	{0xB3A9, 0x75},
+	{0xB3C5, 0x7F},
+	{0xB3E1, 0x7F},
+	{0xB3FD, 0x7F},
+	{0xB414, 0x7F},
+	{0xC92C, 0x67},
+	{0xC92D, 0x67},
+	{0xC92E, 0x6A},
+	{0xC934, 0x01},
+	{0xC935, 0xFF},
+	{0xC936, 0x6B},
+	{0xC937, 0x9E},
+	{0xC938, 0xA0},
+	{0xC939, 0xF0},
+	{0xC93C, 0x00},
+	{0xC93D, 0x05},
+	{0xC94C, 0x00},
+	{0xC94E, 0x00},
+	{0xC94F, 0xFF},
+	{0xC950, 0x00},
+	{0xC951, 0x95},
+	{0xACFC, 0xAA},
+	{0xACFE, 0xA3},
+	{0xB2C4, 0x15},
+	{0xB2CF, 0x0B},
+	{0xB2E0, 0x24},
+	{0xB307, 0x05},
+	{0xB318, 0x19},
+	{0xB323, 0x0F},
+	{0xB33F, 0x20},
+	{0xB345, 0x0C},
+	{0xB350, 0x23},
+	{0xB355, 0x54},
+	{0xB358, 0x46},
+	{0xB361, 0x5B},
+	{0xB364, 0x50},
+	{0xB384, 0x7F},
+	{0xB38F, 0x7F},
+	{0xB395, 0x7F},
+	{0xB3A0, 0x7F},
+	{0xB3AB, 0x7F},
+	{0xB3B1, 0x7F},
+	{0xB3C7, 0x7F},
+	{0xB3CD, 0x7F},
+	{0xB3D8, 0x7F},
+	{0xB3E3, 0x7F},
+	{0xB3E9, 0x7F},
+	{0xB3FF, 0x7F},
+	{0xB405, 0x7F},
+	{0xB410, 0x7F},
+	{0xB415, 0x7F},
+	{0xB418, 0x7F},
+	{0xB421, 0x7F},
+	{0xB424, 0x7F},
+	{0xB7ED, 0x28},
+	{0xB80F, 0x23},
+	{0xB85D, 0x32},
+	{0xB869, 0x3C},
+	{0x7533, 0x00},
+	// Image Quality
+	{0x9D87, 0x37},
+	{0x9D89, 0x37},
+	{0x9D99, 0x40},
+	{0x9D9B, 0x40},
+	{0xA705, 0x2D},
+	{0xA70B, 0x2D},
+	{0xA711, 0x2D},
+	{0xA717, 0x2D},
+	{0xA735, 0x51},
+	{0xA73B, 0x51},
+	{0xA7B7, 0x23},
+	{0xA7B9, 0x23},
+	{0xA7BD, 0x23},
+	{0xA7BF, 0x23},
+	{0xA7C3, 0x23},
+	{0xA7C5, 0x23},
+	{0xA7C9, 0x23},
+	{0xA7CB, 0x23},
+	{0xA805, 0x51},
+	{0xA80B, 0x51},
+	{0xF402, 0x01},
+	{0xF403, 0x01},
+	{0xF412, 0x00},
 
 	{REG_NULL, 0x00},
 };
 
-static const struct regval imx989_linear_10bit_4000x3000_30fps_nopd_regs[] = {
-	/* MIPI output setting */
+static const struct regval imx989_linear_10bit_4096x3072_30fps_pd_on[] = { //modified to 989!
+	// MIPI output setting
 	{0x0112, 0x0A},
 	{0x0113, 0x0A},
-	{0x0114, 0x03},
-
-	/* Line Length PCK Setting */
-	{0x0342, 0x23},  // 8976
-	{0x0343, 0x10},
-
-	/* Frame Length Lines Setting */
-	{0x0340, 0x0B},  // 3064
-	{0x0341, 0xF8},
-
-	/* ROI Setting */
+	{0x0114, 0x02},// 3-trio
+	// Line Length PCK Setting
+	{0x0342, 0x2B},
+	{0x0343, 0xA0},
+	{0x3152, 0x00},
+	// Frame Length Lines Setting
+	{0x0340, 0x2F},
+	{0x0341, 0x70},
+	// ROI Setting
 	{0x0344, 0x00},
 	{0x0345, 0x00},
 	{0x0346, 0x00},
 	{0x0347, 0x00},
 	{0x0348, 0x1F},
-	{0x0349, 0x3F},
+	{0x0349, 0xFF},
 	{0x034A, 0x17},
-	{0x034B, 0x6F},
-
-	/* Mode Setting */
-	{0x0220, 0x62},
-	{0x0222, 0x01},
+	{0x034B, 0xFF},
+	// Mode Setting
 	{0x0900, 0x01},
 	{0x0901, 0x22},
 	{0x0902, 0x08},
-	{0x3140, 0x00},
-	{0x3246, 0x81},
-	{0x3247, 0x81},
-	{0x3F15, 0x00},
-
-	/* Digital Crop & Scaling */
-	{0x0401, 0x00},
-	{0x0404, 0x00},
-	{0x0405, 0x10},
+	{0x3004, 0x03},
+	{0x31A4, 0x00},
+	{0x31A8, 0x04},
+	{0x31D0, 0x41},
+	{0x31D1, 0x41},
+	{0x321C, 0x00},
+	// Digital Crop & Scaling
 	{0x0408, 0x00},
 	{0x0409, 0x00},
 	{0x040A, 0x00},
 	{0x040B, 0x00},
-	{0x040C, 0x0F},
-	{0x040D, 0xA0},
-	{0x040E, 0x0B},
-	{0x040F, 0xB8},
-
-	/* Output Size Setting */
-	{0x034C, 0x0F},
-	{0x034D, 0xA0},
-	{0x034E, 0x0B},
-	{0x034F, 0xB8},
-
-	/* Clock Setting */
-	{0x0301, 0x05},
-	{0x0303, 0x04},
-	{0x0305, 0x04},
+	{0x040C, 0x10},
+	{0x040D, 0x00},
+	{0x040E, 0x0C},
+	{0x040F, 0x00},
+	// Output Size Setting 4096x3072
+	{0x034C, 0x10},
+	{0x034D, 0x00},
+	{0x034E, 0x0C},
+	{0x034F, 0x00},
+	// Clock Setting
+	{0x0301, 0x08},
+	{0x0303, 0x02},
+	{0x0305, 0x03},
 	{0x0306, 0x01},
-	{0x0307, 0x58},
-	{0x030B, 0x02},
-	{0x030D, 0x03},
-	{0x030E, 0x01},
-	{0x030F, 0x1F},
-	{0x0310, 0x01},
-
-	/* Other Setting */
-	{0x3620, 0x00},
-	{0x3621, 0x00},
-	{0x3C11, 0x04},
-	{0x3C12, 0x03},
-	{0x3C13, 0x2D},
-	{0x3F0C, 0x00},
-	{0x3F14, 0x00},
-	{0x3F80, 0x01},
-	{0x3F81, 0x90},
-	{0x3F8C, 0x00},
-	{0x3F8D, 0x14},
-	{0x3FF8, 0x01},
-	{0x3FF9, 0x2A},
-	{0x3FFE, 0x00},
-	{0x3FFF, 0x6C},
-
-	/* Integration Setting */
-	{0x0202, 0x0B},
-	{0x0203, 0xC4},
-	{0x0224, 0x01},
-	{0x0225, 0xF4},
-	{0x3FE0, 0x01},
-	{0x3FE1, 0xF4},
-
-	/* Gain Setting */
-	{0x0204, 0x00},
-	{0x0205, 0x70},
-	{0x0216, 0x00},
-	{0x0217, 0x70},
-	{0x0218, 0x01},
-	{0x0219, 0x00},
-	{0x020E, 0x01},
-	{0x020F, 0x00},
-	{0x0210, 0x01},
-	{0x0211, 0x00},
-	{0x0212, 0x01},
-	{0x0213, 0x00},
-	{0x0214, 0x01},
-	{0x0215, 0x00},
-	{0x3FE2, 0x00},
-	{0x3FE3, 0x70},
-	{0x3FE4, 0x01},
-	{0x3FE5, 0x00},
-
-	/* PDAF TYPE1 Setting */
-	{0x3E20, 0x01},
-	{0x3E37, 0x01},
-
-	{REG_NULL, 0x00},
-};
-
-static const struct regval imx989_linear_10bit_full_raw_6fps_regs[] = {
-	/* MIPI output setting */
-	{0x0112, 0x0A},
-	{0x0113, 0x0A},
-	{0x0114, 0x03},
-
-	/* Line Length PCK Setting */
-	{0x0342, 0x39},
-	{0x0343, 0x70},
-
-	/* Frame Length Lines Setting */
-	{0x0340, 0x17},
-	{0x0341, 0xAC},
-
-	/* ROI Setting */
-	{0x0344, 0x00},
-	{0x0345, 0x00},
-	{0x0346, 0x00},
-	{0x0347, 0x00},
-	{0x0348, 0x1F},
-	{0x0349, 0x3F},
-	{0x034A, 0x17},
-	{0x034B, 0x6F},
-
-	/* Mode Setting */
-	{0x0220, 0x62},
-	{0x0222, 0x01},
-	{0x0900, 0x00},
-	{0x0901, 0x11},
-	{0x0902, 0x0A},
-	{0x3140, 0x00},
-	{0x3246, 0x01},
-	{0x3247, 0x01},
-	{0x3F15, 0x00},
-
-	/* Digital Crop & Scaling */
-	{0x0401, 0x00},
-	{0x0404, 0x00},
-	{0x0405, 0x10},
-	{0x0408, 0x00},
-	{0x0409, 0x00},
-	{0x040A, 0x00},
-	{0x040B, 0x00},
-	{0x040C, 0x1F},
-	{0x040D, 0x40},
-	{0x040E, 0x17},
-	{0x040F, 0x70},
-
-	/* Output Size Setting */
-	{0x034C, 0x1F},
-	{0x034D, 0x40},
-	{0x034E, 0x17},
-	{0x034F, 0x70},
-
-	/* Clock Setting */
-	{0x0301, 0x05},
-	{0x0303, 0x04},
-	{0x0305, 0x04},
-	{0x0306, 0x00},
-	{0x0307, 0xEE},
-	{0x030B, 0x02},
-	{0x030D, 0x06},
-	{0x030E, 0x01},
-	{0x030F, 0x90},
-	{0x0310, 0x01},
-
-	/* Other Setting */
-	{0x3620, 0x00},
-	{0x3621, 0x01},
-	{0x3C11, 0x08},
-	{0x3C12, 0x08},
-	{0x3C13, 0x2A},
-	{0x3F0C, 0x00},
-	{0x3F14, 0x01},
-	{0x3F80, 0x00},
-	{0x3F81, 0x00},
-	{0x3F8C, 0x00},
-	{0x3F8D, 0x00},
-	{0x3FF8, 0x00},
-	{0x3FF9, 0x00},
-	{0x3FFE, 0x03},
-	{0x3FFF, 0x84},
-
-	/* Integration Setting */
-	{0x0202, 0x17},
-	{0x0203, 0x7C},
-	{0x0224, 0x01},
-	{0x0225, 0xF4},
-	{0x3FE0, 0x01},
-	{0x3FE1, 0xF4},
-
-	/* Gain Setting */
-	{0x0204, 0x00},
-	{0x0205, 0x70},
-	{0x0216, 0x00},
-	{0x0217, 0x70},
-	{0x0218, 0x01},
-	{0x0219, 0x00},
-	{0x020E, 0x01},
-	{0x020F, 0x00},
-	{0x0210, 0x01},
-	{0x0211, 0x00},
-	{0x0212, 0x01},
-	{0x0213, 0x00},
-	{0x0214, 0x01},
-	{0x0215, 0x00},
-	{0x3FE2, 0x00},
-	{0x3FE3, 0x70},
-	{0x3FE4, 0x01},
-	{0x3FE5, 0x00},
-
-	/* PDAF TYPE1 Setting */
-	{0x3E20, 0x01},
-	{0x3E37, 0x01},
-
-	{REG_NULL, 0x00},
-};
-
-static const struct regval imx989_linear_10bit_full_remosaic_6fps_regs[] = {
-	/* MIPI output setting */
-	{0x0112, 0x0A},
-	{0x0113, 0x0A},
-	{0x0114, 0x03},
-
-	/* Line Length PCK Setting */
-	{0x0342, 0x39},
-	{0x0343, 0x70},
-
-	/* Frame Length Lines Setting */
-	{0x0340, 0x17},
-	{0x0341, 0xAC},
-
-	/* ROI Setting */
-	{0x0344, 0x00},
-	{0x0345, 0x00},
-	{0x0346, 0x00},
-	{0x0347, 0x00},
-	{0x0348, 0x1F},
-	{0x0349, 0x3F},
-	{0x034A, 0x17},
-	{0x034B, 0x6F},
-
-	/* Mode Setting */
-	{0x0220, 0x62},
-	{0x0222, 0x01},
-	{0x0900, 0x00},
-	{0x0901, 0x11},
-	{0x0902, 0x0A},
-	{0x3140, 0x00},
-	{0x3246, 0x01},
-	{0x3247, 0x01},
-	{0x3F15, 0x00},
-
-	/* Digital Crop & Scaling */
-	{0x0401, 0x00},
-	{0x0404, 0x00},
-	{0x0405, 0x10},
-	{0x0408, 0x00},
-	{0x0409, 0x00},
-	{0x040A, 0x00},
-	{0x040B, 0x00},
-	{0x040C, 0x1F},
-	{0x040D, 0x40},
-	{0x040E, 0x17},
-	{0x040F, 0x70},
-
-	/* Output Size Setting */
-	{0x034C, 0x1F},
-	{0x034D, 0x40},
-	{0x034E, 0x17},
-	{0x034F, 0x70},
-
-	/* Clock Setting */
-	{0x0301, 0x05},
-	{0x0303, 0x04},
-	{0x0305, 0x04},
-	{0x0306, 0x00},
-	{0x0307, 0xEE},
-	{0x030B, 0x02},
-	{0x030D, 0x06},
-	{0x030E, 0x01},
-	{0x030F, 0x90},
-	{0x0310, 0x01},
-
-	/* Other Setting */
-	{0x3620, 0x01},
-	{0x3621, 0x01},
-	{0x3C11, 0x08},
-	{0x3C12, 0x08},
-	{0x3C13, 0x2A},
-	{0x3F0C, 0x00},
-	{0x3F14, 0x01},
-	{0x3F80, 0x00},
-	{0x3F81, 0x14},
-	{0x3F8C, 0x00},
-	{0x3F8D, 0x14},
-	{0x3FF8, 0x00},
-	{0x3FF9, 0x00},
-	{0x3FFE, 0x03},
-	{0x3FFF, 0x52},
-
-	/* Integration Setting */
-	{0x0202, 0x17},
-	{0x0203, 0x7C},
-	{0x0224, 0x01},
-	{0x0225, 0xF4},
-	{0x3FE0, 0x01},
-	{0x3FE1, 0xF4},
-
-	/* Gain Setting */
-	{0x0204, 0x00},
-	{0x0205, 0x70},
-	{0x0216, 0x00},
-	{0x0217, 0x70},
-	{0x0218, 0x01},
-	{0x0219, 0x00},
-	{0x020E, 0x01},
-	{0x020F, 0x00},
-	{0x0210, 0x01},
-	{0x0211, 0x00},
-	{0x0212, 0x01},
-	{0x0213, 0x00},
-	{0x0214, 0x01},
-	{0x0215, 0x00},
-	{0x3FE2, 0x00},
-	{0x3FE3, 0x70},
-	{0x3FE4, 0x01},
-	{0x3FE5, 0x00},
-
-	/* PDAF TYPE1 Setting */
-	{0x3E20, 0x01},
-	{0x3E37, 0x01},
-
-	{REG_NULL, 0x00},
-};
-
-static const struct regval imx989_linear_10bit_full_remosaic_10fps_regs[] = {
-	/* MIPI output setting */
-	{0x0112, 0x0A},
-	{0x0113, 0x0A},
-	{0x0114, 0x03},
-
-	/* Line Length PCK Setting */
-	{0x0342, 0x39},
-	{0x0343, 0x70},
-
-	/* Frame Length Lines Setting */
-	{0x0340, 0x17},
-	{0x0341, 0xAC},
-
-	/* ROI Setting */
-	{0x0344, 0x00},
-	{0x0345, 0x00},
-	{0x0346, 0x00},
-	{0x0347, 0x00},
-	{0x0348, 0x1F},
-	{0x0349, 0x3F},
-	{0x034A, 0x17},
-	{0x034B, 0x6F},
-
-	/* Mode Setting */
-	{0x0220, 0x62},
-	{0x0222, 0x01},
-	{0x0900, 0x00},
-	{0x0901, 0x11},
-	{0x0902, 0x0A},
-	{0x3140, 0x00},
-	{0x3246, 0x01},
-	{0x3247, 0x01},
-	{0x3F15, 0x00},
-
-	/* Digital Crop & Scaling */
-	{0x0401, 0x00},
-	{0x0404, 0x00},
-	{0x0405, 0x10},
-	{0x0408, 0x00},
-	{0x0409, 0x00},
-	{0x040A, 0x00},
-	{0x040B, 0x00},
-	{0x040C, 0x1F},
-	{0x040D, 0x40},
-	{0x040E, 0x17},
-	{0x040F, 0x70},
-
-	/* Output Size Setting */
-	{0x034C, 0x1F},
-	{0x034D, 0x40},
-	{0x034E, 0x17},
-	{0x034F, 0x70},
-
-	/* Clock Setting */
-	{0x0301, 0x05},
-	{0x0303, 0x04},
-	{0x0305, 0x04},
-	{0x0306, 0x01},
-	{0x0307, 0x68},
-	{0x030B, 0x02},
-	{0x030D, 0x06},
+	{0x0307, 0x3E},
+	{0x030B, 0x01},
+	{0x030D, 0x04},
 	{0x030E, 0x02},
-	{0x030F, 0x71},
-	{0x0310, 0x01},
-
-	/* Other Setting */
-	{0x3620, 0x01},
-	{0x3621, 0x01},
-	{0x3C11, 0x08},
-	{0x3C12, 0x08},
-	{0x3C13, 0x2A},
-	{0x3F0C, 0x00},
-	{0x3F14, 0x01},
-	{0x3F80, 0x00},
-	{0x3F81, 0x14},
-	{0x3F8C, 0x00},
-	{0x3F8D, 0x14},
-	{0x3FF8, 0x00},
-	{0x3FF9, 0x00},
-	{0x3FFE, 0x03},
-	{0x3FFF, 0x52},
-
-	/* Integration Setting */
-	{0x0202, 0x17},
-	{0x0203, 0x7C},
+	{0x030F, 0xE7},
+	// Other Setting
+	{0x312D, 0x00},
+	{0x312E, 0x00},
+	{0x312F, 0x00},
+	{0x3205, 0x00},
+	{0x3206, 0x00},
+	{0x3805, 0x01},
+	{0x381F, 0x00},
+	{0x383D, 0x01},
+	{0x383E, 0x01},
+	{0x383F, 0x01},
+	{0x3890, 0x00},
+	{0x3891, 0xF8},
+	{0x3894, 0x00},
+	{0x3895, 0xF4},
+	{0x3896, 0x00},
+	{0x3897, 0xA0},
+	{0x389A, 0x00},
+	{0x389B, 0xA8},
+	{0x38A0, 0x00},
+	{0x38A1, 0x00},
+	{0x38A2, 0x00},
+	{0x38A3, 0x00},
+	{0x38B8, 0x00},
+	{0x38B9, 0xF0},
+	{0x38BC, 0x27},
+	{0x38BD, 0x27},
+	{0x38BE, 0x27},
+	{0x38BF, 0x27},
+	{0x38C0, 0x00},
+	{0x38C1, 0x00},
+	{0x38D0, 0x00},
+	{0x38D1, 0x00},
+	{0x38D6, 0x00},
+	{0x38D7, 0x00},
+	{0x38DA, 0x00},
+	{0x38DB, 0x00},
+	{0x3A34, 0x00},
+	{0x3A35, 0xE6},
+	{0x3A36, 0x00},
+	{0x3A37, 0xE6},
+	{0x3A48, 0x00},
+	{0x3A49, 0xE6},
+	{0x3A4A, 0x00},
+	{0x3A4B, 0xE6},
+	{0x82B6, 0x00},
+	{0x82B7, 0x1A},
+	{0x82BA, 0x00},
+	{0x82BB, 0x1A},
+	{0x7533, 0x01},
+	{0xABB4, 0xFF},
+	{0xABB5, 0xFF},
+	{0xABBC, 0x02},
+	{0xABBD, 0x02},
+	{0xABC4, 0xFF},
+	{0xABC5, 0xFF},
+	{0xABCC, 0x02},
+	{0xABCD, 0x02},
+	{0xBA7E, 0x03},
+	{0xBA81, 0x05},
+	{0xB001, 0x04},
+	{0xD101, 0x04},
+	{0x7533, 0x00},
+	// Integration Setting
+	{0x0202, 0x2F},
+	{0x0203, 0x40},
 	{0x0224, 0x01},
 	{0x0225, 0xF4},
-	{0x3FE0, 0x01},
-	{0x3FE1, 0xF4},
-
-	/* Gain Setting */
+	{0x3162, 0x01},
+	{0x3163, 0xF4},
+	{0x3168, 0x01},
+	{0x3169, 0xF4},
+	// Gain Setting
 	{0x0204, 0x00},
-	{0x0205, 0x70},
-	{0x0216, 0x00},
-	{0x0217, 0x70},
-	{0x0218, 0x01},
-	{0x0219, 0x00},
+	{0x0205, 0x00},
 	{0x020E, 0x01},
 	{0x020F, 0x00},
-	{0x0210, 0x01},
-	{0x0211, 0x00},
-	{0x0212, 0x01},
-	{0x0213, 0x00},
-	{0x0214, 0x01},
-	{0x0215, 0x00},
-	{0x3FE2, 0x00},
-	{0x3FE3, 0x70},
-	{0x3FE4, 0x01},
-	{0x3FE5, 0x00},
-
-	/* PDAF TYPE1 Setting */
-	{0x3E20, 0x01},
-	{0x3E37, 0x01},
+	{0x0216, 0x00},
+	{0x0217, 0x00},
+	{0x0218, 0x01},
+	{0x0219, 0x00},
+	{0x3164, 0x00},
+	{0x3165, 0x00},
+	{0x3166, 0x01},
+	{0x3167, 0x00},
+	{0x316A, 0x00},
+	{0x316B, 0x00},
+	{0x316C, 0x01},
+	{0x316D, 0x00},
+	// HDR mode Setting
+	{0x0220, 0x00},
+	{0x0221, 0x11},
+	{0x0222, 0x01},
+	{0x3161, 0x00},
+	{0x320B, 0x01},
+	// DCGHDR Setting
+	{0x3170, 0x00},
+	{0x3171, 0x00},
+	{0x3172, 0x04},
+	{0x7533, 0x01},
+	{0xB804, 0x00},
+	{0xB805, 0x8C},
+	{0xB83C, 0x00},
+	{0xB83D, 0x96},
+	{0xB874, 0x00},
+	{0xB875, 0xA0},
+	{0x7533, 0x00},
+	// PHASE PIX Setting
+	{0x3104, 0x01},
+	{0x3131, 0x00},
+	{0x3132, 0x1C},
+	{0x3133, 0x80},
+	{0x31BF, 0x01},
+	{0xB598, 0x00},
+	{0xB599, 0x00},
+	// DOL Setting
+	{0x3180, 0x00},
+	{0x3181, 0x00},
+	{0x3188, 0x0A},
+	{0x3189, 0x0A},
+	{0x318A, 0x0A},
+	{0x318B, 0x0A},
+	{0x318C, 0x0A},
+	{0x318D, 0x0A},
+	{0x39D0, 0x00},
+	// EAE-Bracketing Setting
+	{0x0E00, 0x00},
+	{0x0E01, 0x00},
+	{0x0E02, 0x00},
+	{0x0E03, 0x00},
+	{0x0E04, 0xFF},
+	{0x0E05, 0x0F},
+	{0x0E07, 0x01},
+	{0x0E10, 0x00},
+	{0x0E11, 0x00},
+	{0x0E12, 0x00},
+	{0x0E13, 0x00},
+	{0x0E14, 0x00},
+	{0x0E15, 0x00},
+	{0x0E17, 0x00},
+	{0x0E18, 0x00},
+	{0x0E19, 0x00},
+	{0x0E1A, 0x00},
+	{0x0E1B, 0x00},
+	{0x0E1C, 0x00},
+	{0x0E1D, 0x00},
+	{0x0E1E, 0x00},
+	{0x0E1F, 0x00},
+	{0x0E22, 0x00},
+	{0x0E23, 0x00},
+	{0x0E26, 0x00},
+	{0x0E27, 0x00},
+	{0x0E28, 0x00},
+	{0x0E29, 0x00},
+	{0x0E2A, 0x00},
+	{0x0E2B, 0x00},
+	{0x0E2C, 0x00},
+	{0x0E2D, 0x00},
+	{0x0E2E, 0x00},
+	{0x0E2F, 0x00},
+	{0x0E30, 0x00},
+	{0x0E31, 0x00},
+	{0x0E32, 0x00},
+	{0x0E33, 0x00},
+	{0x0E40, 0x00},
+	{0x0E41, 0x00},
+	{0x0E42, 0x00},
+	{0x0E43, 0x00},
+	{0x0E44, 0x00},
+	{0x0E45, 0x00},
+	{0x0E47, 0x00},
+	{0x0E48, 0x00},
+	{0x0E49, 0x00},
+	{0x0E4A, 0x00},
+	{0x0E4B, 0x00},
+	{0x0E4C, 0x00},
+	{0x0E4D, 0x00},
+	{0x0E4E, 0x00},
+	{0x0E4F, 0x00},
+	{0x0E52, 0x00},
+	{0x0E53, 0x00},
+	{0x0E56, 0x00},
+	{0x0E57, 0x00},
+	{0x0E58, 0x00},
+	{0x0E59, 0x00},
+	{0x0E5A, 0x00},
+	{0x0E5B, 0x00},
+	{0x0E5C, 0x00},
+	{0x0E5D, 0x00},
+	{0x0E5E, 0x00},
+	{0x0E5F, 0x00},
+	{0x0E60, 0x00},
+	{0x0E61, 0x00},
+	{0x0E62, 0x00},
+	{0x0E63, 0x00},
+	{0x0E70, 0x00},
+	{0x0E71, 0x00},
+	{0x0E72, 0x00},
+	{0x0E73, 0x00},
+	{0x0E74, 0x00},
+	{0x0E75, 0x00},
+	{0x0E77, 0x00},
+	{0x0E78, 0x00},
+	{0x0E79, 0x00},
+	{0x0E7A, 0x00},
+	{0x0E7B, 0x00},
+	{0x0E7C, 0x00},
+	{0x0E7D, 0x00},
+	{0x0E7E, 0x00},
+	{0x0E7F, 0x00},
+	{0x0E82, 0x00},
+	{0x0E83, 0x00},
+	{0x0E86, 0x00},
+	{0x0E87, 0x00},
+	{0x0E88, 0x00},
+	{0x0E89, 0x00},
+	{0x0E8A, 0x00},
+	{0x0E8B, 0x00},
+	{0x0E8C, 0x00},
+	{0x0E8D, 0x00},
+	{0x0E8E, 0x00},
+	{0x0E8F, 0x00},
+	{0x0E90, 0x00},
+	{0x0E91, 0x00},
+	{0x0E92, 0x00},
+	{0x0E93, 0x00},
+	{0x3240, 0x00},
+	{0x3241, 0x00},
+	{0x3248, 0x00},
+	// Data Identifier
+	{0x3087, 0x30},
+	// Global Timing MIPI (3567 Msps/trio)
+	{0x0808, 0x02},
+	{0x084E, 0x00},
+	{0x084F, 0x1F},
+	{0x0850, 0x00},
+	{0x0851, 0x19},
+	{0x0852, 0x00},
+	{0x0853, 0x33},
+	{0x0854, 0x00},
+	{0x0855, 0x29},
+	{0x0858, 0x00},
+	{0x0859, 0x1F},
 
 	{REG_NULL, 0x00},
 };
-
 static const struct imx989_mode supported_modes[] = {
 	{
-		.width = 4000,
-		.height = 3000,
+		.width = 4096,
+		.height = 3072,
 		.max_fps = {
 			.numerator = 10000,
 			.denominator = 300000,
 		},
-		.exp_def = 0x0B00,
-		.hts_def = 0x2310,
-		.vts_def = 0x0BF8,
+		.exp_def = 0x2f40,
+		.hts_def = 0x2ba0,//11168
+		.vts_def = 0x2f70,//12144
 		.bus_fmt = MEDIA_BUS_FMT_SRGGB10_1X10,
-		.global_reg_list = imx989_linear_10bit_global_regs,
-		.reg_list = imx989_linear_10bit_4000x3000_30fps_nopd_regs,
+		.global_reg_list = imx989_init_regs,
+		.reg_list = imx989_linear_10bit_4096x3072_30fps_pd_on,
+		.spd = &imx989_spd,
+		.ebd = &imx989_ebd,
 		.hdr_mode = NO_HDR,
-		.mipi_freq_idx = 0,
-		.vc[PAD0] = 0,
-	},
-	{
-		.width = 8000,
-		.height = 6000,
-		.max_fps = {
-			.numerator = 10000,
-			.denominator = 64100,
-		},
-		.exp_def = 0x0B00,
-		.hts_def = 0x3970,
-		.vts_def = 0x17AC,
-		.bus_fmt = MEDIA_BUS_FMT_SRGGB10_1X10,
-		.global_reg_list = imx989_linear_10bit_global_regs,
-		.reg_list = imx989_linear_10bit_full_raw_6fps_regs,
-		.hdr_mode = NO_HDR,
-		.mipi_freq_idx = 0,
-		.vc[PAD0] = 0,
-	},
-	{
-		.width = 8000,
-		.height = 6000,
-		.max_fps = {
-			.numerator = 10000,
-			.denominator = 64100,
-		},
-		.exp_def = 0x0B00,
-		.hts_def = 0x3970,
-		.vts_def = 0x17AC,
-		.bus_fmt = MEDIA_BUS_FMT_SRGGB10_1X10,
-		.global_reg_list = imx989_linear_10bit_global_regs,
-		.reg_list = imx989_linear_10bit_full_remosaic_6fps_regs,
-		.hdr_mode = NO_HDR,
-		.mipi_freq_idx = 0,
-		.vc[PAD0] = 0,
-	},
-	{
-		.width = 8000,
-		.height = 6000,
-		.max_fps = {
-			.numerator = 10000,
-			.denominator = 97000,
-		},
-		.exp_def = 0x0B00,
-		.hts_def = 0x3970,
-		.vts_def = 0x17AC,
-		.bus_fmt = MEDIA_BUS_FMT_SRGGB10_1X10,
-		.global_reg_list = imx989_linear_10bit_global_regs,
-		.reg_list = imx989_linear_10bit_full_remosaic_10fps_regs,
-		.hdr_mode = NO_HDR,
-		.mipi_freq_idx = 1,
+		.mipi_freq_idx = 3,
 		.vc[PAD0] = 0,
 	},
 };
 
 static const s64 link_freq_items[] = {
-	IMX989_LINK_FREQ_400,
-	IMX989_LINK_FREQ_625,
+	IMX989_MIPI_FREQ_356M,
+	IMX989_MIPI_FREQ_384M,
+	IMX989_MIPI_FREQ_750M,
+	IMX989_MIPI_FREQ_1250M,
 };
-
 static const char * const imx989_test_pattern_menu[] = {
 	"Disabled",
 	"Solid color",
@@ -880,55 +857,9 @@ static const char * const imx989_test_pattern_menu[] = {
 	"PN9"
 };
 
-/* Write registers up to 4 at a time */
-static int imx989_write_reg(struct i2c_client *client, u16 reg,
-			    int len, u32 val)
-{
-	u32 buf_i, val_i;
-	u8 buf[6];
-	u8 *val_p;
-	__be32 val_be;
-
-	if (len > 4)
-		return -EINVAL;
-
-	buf[0] = reg >> 8;
-	buf[1] = reg & 0xff;
-
-	val_be = cpu_to_be32(val);
-	val_p = (u8 *)&val_be;
-	buf_i = 2;
-	val_i = 4 - len;
-
-	while (val_i < 4)
-		buf[buf_i++] = val_p[val_i++];
-
-	if (i2c_master_send(client, buf, len + 2) != len + 2)
-		return -EIO;
-
-	return 0;
-}
-
-static int imx989_write_array(struct i2c_client *client,
-			      const struct regval *regs)
-{
-	u32 i;
-	int ret = 0;
-
-	for (i = 0; ret == 0 && regs[i].addr != REG_NULL; i++)
-		if (unlikely(regs[i].addr == REG_DELAY))
-			usleep_range(regs[i].val, regs[i].val * 2);
-		else
-			ret = imx989_write_reg(client, regs[i].addr,
-					       IMX989_REG_VALUE_08BIT,
-					       regs[i].val);
-
-	return ret;
-}
-
 /* Read registers up to 4 at a time */
 static int imx989_read_reg(struct i2c_client *client, u16 reg, unsigned int len,
-			   u32 *val)
+			   u32 *val) //ok for all
 {
 	struct i2c_msg msgs[2];
 	u8 *data_be_p;
@@ -965,15 +896,83 @@ static int imx989_read_reg(struct i2c_client *client, u16 reg, unsigned int len,
 	return 0;
 }
 
+/* Write registers up to 4 at a time */
+static int imx989_write_reg(struct i2c_client *client, u16 reg,
+			    int len, u32 val) //ok for all
+{
+	u32 buf_i, val_i;
+	u8 buf[6];
+	u8 *val_p;
+	__be32 val_be;
+
+	if (len > 4)
+		return -EINVAL;
+
+	buf[0] = reg >> 8;
+	buf[1] = reg & 0xff;
+
+	val_be = cpu_to_be32(val);
+	val_p = (u8 *)&val_be;
+	buf_i = 2;
+	val_i = 4 - len;
+
+	while (val_i < 4)
+		buf[buf_i++] = val_p[val_i++];
+
+	if (i2c_master_send(client, buf, len + 2) != len + 2)
+		return -EIO;
+
+	// readback
+	if (len == IMX989_REG_VALUE_08BIT) {
+		u32 read_val;
+		int ret = imx989_read_reg(client, reg, len, &read_val);
+		if (ret < 0)
+			return ret;
+
+		if (read_val != val) {
+			dev_err(&client->dev,
+				"Failed to write register 0x%04x: "
+				"expected 0x%02x, read 0x%02x\n",
+				reg, val & 0xff, read_val & 0xff);
+		}
+	}else {
+        dev_warn(&client->dev,
+         "Unverified write to register 0x%04x: "
+         "expected 0x%08x\n", reg, val);
+    }
+
+
+	return 0;
+}
+
+static int imx989_write_array(struct i2c_client *client,
+			      const struct regval *regs)//ok for all
+{
+	u32 i;
+	int ret = 0;
+
+	for (i = 0; ret == 0 && regs[i].addr != REG_NULL; i++)
+		if (unlikely(regs[i].addr == REG_DELAY))
+			usleep_range(regs[i].val, regs[i].val * 2);
+		else
+			ret = imx989_write_reg(client, regs[i].addr,
+					       IMX989_REG_VALUE_08BIT,
+					       regs[i].val);
+
+	return ret;
+}
+
+
+
 static int imx989_get_reso_dist(const struct imx989_mode *mode,
-				struct v4l2_mbus_framefmt *framefmt)
+				struct v4l2_mbus_framefmt *framefmt)//ok for all
 {
 	return abs(mode->width - framefmt->width) +
 		   abs(mode->height - framefmt->height);
 }
 
 static const struct imx989_mode *
-imx989_find_best_fit(struct imx989 *imx989, struct v4l2_subdev_format *fmt)
+imx989_find_best_fit(struct imx989 *imx989, struct v4l2_subdev_format *fmt)//ok for all
 {
 	struct v4l2_mbus_framefmt *framefmt = &fmt->format;
 	int dist;
@@ -994,7 +993,7 @@ imx989_find_best_fit(struct imx989 *imx989, struct v4l2_subdev_format *fmt)
 
 static int imx989_set_fmt(struct v4l2_subdev *sd,
 			  struct v4l2_subdev_state *sd_state,
-			  struct v4l2_subdev_format *fmt)
+			  struct v4l2_subdev_format *fmt)//ok for all
 {
 	struct imx989 *imx989 = to_imx989(sd);
 	const struct imx989_mode *mode;
@@ -1027,7 +1026,7 @@ static int imx989_set_fmt(struct v4l2_subdev *sd,
 
 		__v4l2_ctrl_s_ctrl(imx989->vblank, vblank_def);
 		__v4l2_ctrl_s_ctrl(imx989->link_freq, mode->mipi_freq_idx);
-		pixel_rate = (u32)link_freq_items[mode->mipi_freq_idx] / 10 * 2 * IMX989_LANES;
+		pixel_rate = (u32)link_freq_items[mode->mipi_freq_idx] * 2 * IMX989_LANES / 10 ;
 		__v4l2_ctrl_s_ctrl_int64(imx989->pixel_rate,
 					 pixel_rate);
 	}
@@ -1042,7 +1041,7 @@ static int imx989_set_fmt(struct v4l2_subdev *sd,
 
 static int imx989_get_fmt(struct v4l2_subdev *sd,
 			  struct v4l2_subdev_state *sd_state,
-			  struct v4l2_subdev_format *fmt)
+			  struct v4l2_subdev_format *fmt)//ok for all
 {
 	struct imx989 *imx989 = to_imx989(sd);
 	const struct imx989_mode *mode = imx989->cur_mode;
@@ -1058,21 +1057,26 @@ static int imx989_get_fmt(struct v4l2_subdev *sd,
 	} else {
 		fmt->format.width = mode->width;
 		fmt->format.height = mode->height;
-		if (imx989->flip & IMX989_MIRROR_BIT_MASK) {
-			fmt->format.code = MEDIA_BUS_FMT_SGRBG10_1X10;
-			if (imx989->flip & IMX989_FLIP_BIT_MASK)
-				fmt->format.code = MEDIA_BUS_FMT_SBGGR10_1X10;
-		} else if (imx989->flip & IMX989_FLIP_BIT_MASK) {
-			fmt->format.code = MEDIA_BUS_FMT_SGBRG10_1X10;
-		} else {
-			fmt->format.code = mode->bus_fmt;
-		}
+		fmt->format.code = mode->bus_fmt;
 		fmt->format.field = V4L2_FIELD_NONE;
 		/* format info: width/height/data type/virctual channel */
-		if (fmt->pad < PAD_MAX && mode->hdr_mode != NO_HDR)
-			fmt->reserved[0] = mode->vc[fmt->pad];
-		else
-			fmt->reserved[0] = mode->vc[PAD0];
+		// if (fmt->pad < PAD_MAX && mode->hdr_mode != NO_HDR)
+		// 	fmt->reserved[0] = mode->vc[fmt->pad];
+		// else
+		// 	fmt->reserved[0] = mode->vc[PAD0];
+		if (fmt->pad == imx989->spd_id && mode->spd) {
+			fmt->format.width = mode->spd->width;
+			fmt->format.height = mode->spd->height;
+			fmt->format.code = mode->spd->bus_fmt;
+			//Set the vc channel to be consistent with the valid data
+			fmt->reserved[0] = 0;
+		} else if (fmt->pad == imx989->ebd_id && mode->ebd) {
+			fmt->format.width = mode->ebd->width;
+			fmt->format.height = mode->ebd->height;
+			fmt->format.code = mode->ebd->bus_fmt;
+			//Set the vc channel to be consistent with the valid data
+			fmt->reserved[0] = 0;
+		}
 	}
 	mutex_unlock(&imx989->mutex);
 
@@ -1081,7 +1085,7 @@ static int imx989_get_fmt(struct v4l2_subdev *sd,
 
 static int imx989_enum_mbus_code(struct v4l2_subdev *sd,
 				 struct v4l2_subdev_state *sd_state,
-				 struct v4l2_subdev_mbus_code_enum *code)
+				 struct v4l2_subdev_mbus_code_enum *code)//ok for all
 {
 	struct imx989 *imx989 = to_imx989(sd);
 
@@ -1094,7 +1098,7 @@ static int imx989_enum_mbus_code(struct v4l2_subdev *sd,
 
 static int imx989_enum_frame_sizes(struct v4l2_subdev *sd,
 				   struct v4l2_subdev_state *sd_state,
-				   struct v4l2_subdev_frame_size_enum *fse)
+				   struct v4l2_subdev_frame_size_enum *fse)//ok for all
 {
 	struct imx989 *imx989 = to_imx989(sd);
 
@@ -1112,7 +1116,7 @@ static int imx989_enum_frame_sizes(struct v4l2_subdev *sd,
 	return 0;
 }
 
-static int imx989_enable_test_pattern(struct imx989 *imx989, u32 pattern)
+static int imx989_enable_test_pattern(struct imx989 *imx989, u32 pattern)//ok for 989
 {
 	u32 val;
 
@@ -1128,7 +1132,7 @@ static int imx989_enable_test_pattern(struct imx989 *imx989, u32 pattern)
 }
 
 static int imx989_g_frame_interval(struct v4l2_subdev *sd,
-				   struct v4l2_subdev_frame_interval *fi)
+				   struct v4l2_subdev_frame_interval *fi)//ok for all
 {
 	struct imx989 *imx989 = to_imx989(sd);
 	const struct imx989_mode *mode = imx989->cur_mode;
@@ -1139,16 +1143,18 @@ static int imx989_g_frame_interval(struct v4l2_subdev *sd,
 }
 
 static int imx989_g_mbus_config(struct v4l2_subdev *sd, unsigned int pad_id,
-				struct v4l2_mbus_config *config)
+				struct v4l2_mbus_config *config)//ok for all
 {
-	config->type = V4L2_MBUS_CSI2_DPHY;
-	config->bus.mipi_csi2.num_data_lanes = IMX989_LANES;
+	struct imx989 *imx989 = to_imx989(sd);
+	
+	config->type = imx989->bus_cfg.bus_type;
+	config->bus.mipi_csi2 = imx989->bus_cfg.bus.mipi_csi2;
 
 	return 0;
 }
 
 static void imx989_get_otp(struct otp_info *otp,
-			       struct rkmodule_inf *inf)
+			       struct rkmodule_inf *inf)// TODO: modify for imx989!!!
 {
 	u32 i, j;
 	u32 w, h;
@@ -1250,7 +1256,7 @@ static int imx989_get_channel_info(struct imx989 *imx989, struct rkmodule_channe
 		return -EINVAL;
 
 	if (ch_info->index == imx989->spd_id && mode->spd) {
-		ch_info->vc = 0;
+		ch_info->vc = 1;
 		ch_info->width = mode->spd->width;
 		ch_info->height = mode->spd->height;
 		ch_info->bus_fmt = mode->spd->bus_fmt;
@@ -1265,7 +1271,7 @@ static int imx989_get_channel_info(struct imx989 *imx989, struct rkmodule_channe
 	return 0;
 }
 
-static long imx989_ioctl(struct v4l2_subdev *sd, unsigned int cmd, void *arg)
+static long imx989_ioctl(struct v4l2_subdev *sd, unsigned int cmd, void *arg)//FIXME:
 {
 	struct imx989 *imx989 = to_imx989(sd);
 	struct rkmodule_hdr_cfg *hdr;
@@ -1317,12 +1323,12 @@ static long imx989_ioctl(struct v4l2_subdev *sd, unsigned int cmd, void *arg)
 			    MEDIA_BUS_FMT_SRGGB10_1X10) {
 				imx989->cur_link_freq = 0;
 				imx989->cur_pixel_rate =
-				PIXEL_RATE_WITH_848M_10BIT;
+				PIXEL_RATE_WITH_1250M_10BIT;
 			} else if (imx989->cur_mode->bus_fmt ==
 				   MEDIA_BUS_FMT_SRGGB12_1X12) {
 				imx989->cur_link_freq = 0;
 				imx989->cur_pixel_rate =
-				PIXEL_RATE_WITH_848M_12BIT;
+				PIXEL_RATE_WITH_1250M_12BIT;
 			}
 
 			__v4l2_ctrl_s_ctrl_int64(imx989->pixel_rate,
@@ -1468,7 +1474,7 @@ static long imx989_compat_ioctl32(struct v4l2_subdev *sd,
 }
 #endif
 
-static int imx989_set_flip(struct imx989 *imx989)
+static int imx989_set_flip(struct imx989 *imx989)//FIXME: Don't know 989's register
 {
 	int ret = 0;
 	u32 val = 0;
@@ -1489,17 +1495,25 @@ static int imx989_set_flip(struct imx989 *imx989)
 	return ret;
 }
 
-static int __imx989_start_stream(struct imx989 *imx989)
+static int __imx989_start_stream(struct imx989 *imx989)// really apply the mode
 {
 	int ret;
 
 	ret = imx989_write_array(imx989->client, imx989->cur_mode->global_reg_list);
 	if (ret)
+	{
+		dev_err(&imx989->client->dev,
+			"Failed to write global registers\n");
 		return ret;
+	}
 
 	ret = imx989_write_array(imx989->client, imx989->cur_mode->reg_list);
 	if (ret)
+	{
+		dev_err(&imx989->client->dev,
+			"Failed to write mode registers\n");
 		return ret;
+	}
 	imx989->cur_vts = imx989->cur_mode->vts_def;
 	/* In case these controls are set before streaming */
 	ret = __v4l2_ctrl_handler_setup(&imx989->ctrl_handler);
@@ -1527,7 +1541,7 @@ static int __imx989_stop_stream(struct imx989 *imx989)
 				IMX989_REG_VALUE_08BIT, IMX989_MODE_SW_STANDBY);
 }
 
-static int imx989_s_stream(struct v4l2_subdev *sd, int on)
+static int imx989_s_stream(struct v4l2_subdev *sd, int on)//FIXME:
 {
 	struct imx989 *imx989 = to_imx989(sd);
 	struct i2c_client *client = imx989->client;
@@ -1563,6 +1577,9 @@ static int imx989_s_stream(struct v4l2_subdev *sd, int on)
 	}
 
 	imx989->streaming = on;
+	//log
+	dev_info(&client->dev, "%s: %s\n", __func__,
+			on ? "streaming on" : "streaming off");
 
 unlock_and_return:
 	mutex_unlock(&imx989->mutex);
@@ -1570,7 +1587,7 @@ unlock_and_return:
 	return ret;
 }
 
-static int imx989_s_power(struct v4l2_subdev *sd, int on)
+static int imx989_s_power(struct v4l2_subdev *sd, int on)//ok for all
 {
 	struct imx989 *imx989 = to_imx989(sd);
 	struct i2c_client *client = imx989->client;
@@ -1602,28 +1619,34 @@ unlock_and_return:
 }
 
 /* Calculate the delay in us by clock rate and clock cycles */
-static inline u32 imx989_cal_delay(u32 cycles)
+static inline u32 imx989_cal_delay(u32 cycles)//ok for all
 {
 	return DIV_ROUND_UP(cycles, IMX989_XVCLK_FREQ / 1000 / 1000);
 }
 
-static int __imx989_power_on(struct imx989 *imx989)
+static int __imx989_power_on(struct imx989 *imx989)//ok for all
 {
 	int ret;
 	u32 delay_us;
 	struct device *dev = &imx989->client->dev;
 
-	ret = clk_set_rate(imx989->xvclk, IMX989_XVCLK_FREQ);
-	if (ret < 0) {
-		dev_err(dev, "Failed to set xvclk rate (24MHz)\n");
-		return ret;
+	if(!imx989->xvclk) {
+		dev_err(dev, "xvclk is not ready, skip xvclk. you will have to provide clock yourself\n");
 	}
-	if (clk_get_rate(imx989->xvclk) != IMX989_XVCLK_FREQ)
-		dev_warn(dev, "xvclk mismatched, modes are based on 37.125MHz\n");
-	ret = clk_prepare_enable(imx989->xvclk);
-	if (ret < 0) {
-		dev_err(dev, "Failed to enable xvclk\n");
-		return ret;
+	else
+	{
+		ret = clk_set_rate(imx989->xvclk, IMX989_XVCLK_FREQ);
+		if (ret < 0) {
+			dev_err(dev, "Failed to set xvclk rate (19.2MHz)\n");
+			return ret;
+		}
+		if (clk_get_rate(imx989->xvclk) != IMX989_XVCLK_FREQ)
+			dev_warn(dev, "xvclk mismatched, modes are based on 19.2MHz\n");
+		ret = clk_prepare_enable(imx989->xvclk);
+		if (ret < 0) {
+			dev_err(dev, "Failed to enable xvclk\n");
+			return ret;
+		}
 	}
 
 	if (!IS_ERR(imx989->reset_gpio))
@@ -1651,12 +1674,15 @@ static int __imx989_power_on(struct imx989 *imx989)
 	return 0;
 
 disable_clk:
-	clk_disable_unprepare(imx989->xvclk);
+    if (!IS_ERR(imx989->xvclk))
+	{
+        clk_disable_unprepare(imx989->xvclk);
+	}
 
 	return ret;
 }
 
-static void __imx989_power_off(struct imx989 *imx989)
+static void __imx989_power_off(struct imx989 *imx989)//ok for all
 {
 
 	if (!IS_ERR(imx989->pwdn_gpio))
@@ -1667,7 +1693,7 @@ static void __imx989_power_off(struct imx989 *imx989)
 	regulator_bulk_disable(IMX989_NUM_SUPPLIES, imx989->supplies);
 }
 
-static int imx989_runtime_resume(struct device *dev)
+static int imx989_runtime_resume(struct device *dev)//ok for all
 {
 	struct i2c_client *client = to_i2c_client(dev);
 	struct v4l2_subdev *sd = i2c_get_clientdata(client);
@@ -1676,7 +1702,7 @@ static int imx989_runtime_resume(struct device *dev)
 	return __imx989_power_on(imx989);
 }
 
-static int imx989_runtime_suspend(struct device *dev)
+static int imx989_runtime_suspend(struct device *dev)//ok for all
 {
 	struct i2c_client *client = to_i2c_client(dev);
 	struct v4l2_subdev *sd = i2c_get_clientdata(client);
@@ -1688,7 +1714,7 @@ static int imx989_runtime_suspend(struct device *dev)
 }
 
 #ifdef CONFIG_VIDEO_V4L2_SUBDEV_API
-static int imx989_open(struct v4l2_subdev *sd, struct v4l2_subdev_fh *fh)
+static int imx989_open(struct v4l2_subdev *sd, struct v4l2_subdev_fh *fh)//ok for all
 {
 	struct imx989 *imx989 = to_imx989(sd);
 	struct v4l2_mbus_framefmt *try_fmt =
@@ -1711,7 +1737,7 @@ static int imx989_open(struct v4l2_subdev *sd, struct v4l2_subdev_fh *fh)
 
 static int imx989_enum_frame_interval(struct v4l2_subdev *sd,
 				      struct v4l2_subdev_state *sd_state,
-				struct v4l2_subdev_frame_interval_enum *fie)
+				struct v4l2_subdev_frame_interval_enum *fie)//ok for all
 {
 	struct imx989 *imx989 = to_imx989(sd);
 
@@ -1765,15 +1791,28 @@ static const struct v4l2_subdev_ops imx989_subdev_ops = {
 	.pad	= &imx989_pad_ops,
 };
 
-static int imx989_set_ctrl(struct v4l2_ctrl *ctrl)
+static int imx989_set_gain_reg(struct imx989 *imx989, u32 a_gain) {
+    int ret = 0;
+    u32 gain_reg = 0;
+    gain_reg = (16384 - (16384*16 / a_gain));
+    ret = imx989_write_reg(imx989->client,
+        IMX989_REG_GAIN_H,
+        IMX989_REG_VALUE_08BIT,
+        IMX989_FETCH_AGAIN_H(gain_reg));
+    ret |= imx989_write_reg(imx989->client,
+        IMX989_REG_GAIN_L,
+        IMX989_REG_VALUE_08BIT,
+        IMX989_FETCH_AGAIN_L(gain_reg));
+    return ret;
+}
+
+static int imx989_set_ctrl(struct v4l2_ctrl *ctrl)//FIXME: check 989's exposure and gain registers
 {
 	struct imx989 *imx989 = container_of(ctrl->handler,
 					     struct imx989, ctrl_handler);
 	struct i2c_client *client = imx989->client;
 	s64 max;
 	int ret = 0;
-	u32 again = 0;
-
 	/* Propagate change of current control to all related controls */
 	switch (ctrl->id) {
 	case V4L2_CID_VBLANK:
@@ -1804,26 +1843,7 @@ static int imx989_set_ctrl(struct v4l2_ctrl *ctrl)
 			ctrl->val);
 		break;
 	case V4L2_CID_ANALOGUE_GAIN:
-		/* gain_reg = 1024 - 1024 / gain_ana
-		 * manual multiple 16 to add accuracy:
-		 * then formula change to:
-		 * gain_reg = 1024 - 1024 * 16 / (gain_ana * 16)
-		 */
-		if (ctrl->val > 0x400)
-			ctrl->val = 0x400;
-		if (ctrl->val < 0x10)
-			ctrl->val = 0x10;
-
-		again = 1024 - 1024 * 16 / ctrl->val;
-		ret = imx989_write_reg(imx989->client, IMX989_REG_GAIN_H,
-				       IMX989_REG_VALUE_08BIT,
-				       IMX989_FETCH_AGAIN_H(again));
-		ret |= imx989_write_reg(imx989->client, IMX989_REG_GAIN_L,
-					IMX989_REG_VALUE_08BIT,
-					IMX989_FETCH_AGAIN_L(again));
-
-		dev_dbg(&client->dev, "set analog gain 0x%x\n",
-			ctrl->val);
+		ret = imx989_set_gain_reg(imx989, ctrl->val);
 		break;
 	case V4L2_CID_VBLANK:
 		ret = imx989_write_reg(imx989->client,
@@ -1877,7 +1897,7 @@ static const struct v4l2_ctrl_ops imx989_ctrl_ops = {
 	.s_ctrl = imx989_set_ctrl,
 };
 
-static int imx989_initialize_controls(struct imx989 *imx989)
+static int imx989_initialize_controls(struct imx989 *imx989)//ok for 989
 {
 	const struct imx989_mode *mode;
 	struct v4l2_ctrl_handler *handler;
@@ -1899,15 +1919,15 @@ static int imx989_initialize_controls(struct imx989 *imx989)
 
 	if (imx989->cur_mode->bus_fmt == MEDIA_BUS_FMT_SRGGB10_1X10) {
 		imx989->cur_link_freq = 0;
-		imx989->cur_pixel_rate = PIXEL_RATE_WITH_848M_10BIT;
+		imx989->cur_pixel_rate = PIXEL_RATE_WITH_1250M_10BIT;
 	} else if (imx989->cur_mode->bus_fmt == MEDIA_BUS_FMT_SRGGB12_1X12) {
 		imx989->cur_link_freq = 0;
-		imx989->cur_pixel_rate = PIXEL_RATE_WITH_848M_12BIT;
+		imx989->cur_pixel_rate = PIXEL_RATE_WITH_1250M_12BIT;
 	}
 
 	imx989->pixel_rate = v4l2_ctrl_new_std(handler, NULL,
 					       V4L2_CID_PIXEL_RATE,
-					       0, PIXEL_RATE_WITH_848M_10BIT,
+					       0, PIXEL_RATE_WITH_1250M_10BIT,
 					       1, imx989->cur_pixel_rate);
 	v4l2_ctrl_s_ctrl(imx989->link_freq,
 			   imx989->cur_link_freq);
@@ -1968,7 +1988,7 @@ err_free_handler:
 }
 
 static int imx989_check_sensor_id(struct imx989 *imx989,
-				  struct i2c_client *client)
+				  struct i2c_client *client)//ok for 989
 {
 	struct device *dev = &imx989->client->dev;
 	u16 id = 0;
@@ -1989,7 +2009,7 @@ static int imx989_check_sensor_id(struct imx989 *imx989,
 	return 0;
 }
 
-static int imx989_configure_regulators(struct imx989 *imx989)
+static int imx989_configure_regulators(struct imx989 *imx989)//ok for all
 {
 	unsigned int i;
 
@@ -2015,6 +2035,8 @@ static int imx989_probe(struct i2c_client *client,
 	struct i2c_client *eeprom_ctrl_client;
 	struct v4l2_subdev *eeprom_ctrl;
 	struct otp_info *otp_ptr;
+	struct device_node *ep;
+
 
 	dev_info(dev, "driver version: %02x.%02x.%02x",
 		 DRIVER_VERSION >> 16,
@@ -2059,7 +2081,7 @@ static int imx989_probe(struct i2c_client *client,
 	imx989->xvclk = devm_clk_get(dev, "xvclk");
 	if (IS_ERR(imx989->xvclk)) {
 		dev_err(dev, "Failed to get xvclk\n");
-		return -EINVAL;
+		// return -EINVAL;
 	}
 
 	imx989->reset_gpio = devm_gpiod_get(dev, "reset", GPIOD_OUT_LOW);
@@ -2078,6 +2100,40 @@ static int imx989_probe(struct i2c_client *client,
 		dev_err(dev,
 			"failed get spd_id, will not to use spd\n");
 	}
+
+	ret = of_property_read_u32(node,
+				   "rockchip,ebd-id",
+				   &imx989->ebd_id);
+	if (ret != 0) {
+		imx989->ebd_id = PAD_MAX;
+		dev_err(dev,
+			"failed get ebd_id, will not to use ebd\n");
+	}
+
+	ep = of_graph_get_next_endpoint(dev->of_node, NULL);
+	if (!ep) {
+		dev_err(dev, "missing endpoint node\n");
+		return -EINVAL;
+	}
+
+	ret = v4l2_fwnode_endpoint_parse(of_fwnode_handle(ep),
+					&imx989->bus_cfg);
+	if (ret) {
+		dev_err(dev, "failed to parse endpoint\n");
+		of_node_put(ep);
+		return ret;
+	}
+
+	if (imx989->bus_cfg.bus_type != V4L2_MBUS_CSI2_CPHY) {
+		dev_err(dev, "bus type %d is not supported, only V4L2_MBUS_CSI2_CPHY is supported\n",
+			imx989->bus_cfg.bus_type);
+		of_node_put(ep);
+		return -EINVAL;
+	}
+	else {
+		dev_dbg(dev, "bus type V4L2_MBUS_CSI2_CPHY is supported\n");
+	}
+
 
 	ret = imx989_configure_regulators(imx989);
 	if (ret) {
@@ -2131,7 +2187,8 @@ continue_probe:
 
 #ifdef CONFIG_VIDEO_V4L2_SUBDEV_API
 	sd->internal_ops = &imx989_internal_ops;
-	sd->flags |= V4L2_SUBDEV_FL_HAS_DEVNODE;
+	sd->flags |= V4L2_SUBDEV_FL_HAS_DEVNODE |
+		     V4L2_SUBDEV_FL_HAS_EVENTS;
 #endif
 #if defined(CONFIG_MEDIA_CONTROLLER)
 	imx989->pad.flags = MEDIA_PAD_FL_SOURCE;
@@ -2176,7 +2233,7 @@ err_destroy_mutex:
 	return ret;
 }
 
-static void imx989_remove(struct i2c_client *client)
+static void imx989_remove(struct i2c_client *client)//ok for all
 {
 	struct v4l2_subdev *sd = i2c_get_clientdata(client);
 	struct imx989 *imx989 = to_imx989(sd);
