@@ -41,12 +41,12 @@
 #define V4L2_CID_DIGITAL_GAIN		V4L2_CID_GAIN
 #endif
 
-#define IMX989_MIPI_FREQ_1250M			1250000000
+#define IMX989_MIPI_FREQ_1250M			450000000
 
 #define IMX989_LANES			3
 
-#define PIXEL_RATE_WITH_1250M_10BIT	((u64)IMX989_MIPI_FREQ_1250M * 2  * 4 / 10)
-#define PIXEL_RATE_WITH_1250M_12BIT	((u64)IMX989_MIPI_FREQ_1250M * 2  * 4 / 12)
+#define PIXEL_RATE_WITH_1250M_10BIT	((u64)IMX989_MIPI_FREQ_1250M * 2  * 3 / 10)
+#define PIXEL_RATE_WITH_1250M_12BIT	((u64)IMX989_MIPI_FREQ_1250M * 2  * 3 / 12)
 
 #define IMX989_XVCLK_FREQ		19200000
 
@@ -568,10 +568,10 @@ static const struct regval imx989_linear_10bit_4096x3072_30fps_pd_on[] = { //mod
 	{0x0305, 0x03},
 	{0x0306, 0x01},
 	{0x0307, 0x3E},
-	{0x030B, 0x01},
-	{0x030D, 0x04},
-	{0x030E, 0x02},
-	{0x030F, 0xE7},
+	{0x030B, 0x04},
+	{0x030D, 0x02},
+	{0x030E, 0x01},
+	{0x030F, 0x77},
 	// Other Setting
 	{0x312D, 0x00},
 	{0x312E, 0x00},
@@ -804,17 +804,17 @@ static const struct regval imx989_linear_10bit_4096x3072_30fps_pd_on[] = { //mod
 	// Data Identifier
 	{0x3087, 0x30},
 	// Global Timing MIPI (3567 Msps/trio)
-	{0x0808, 0x02},
-	{0x084E, 0x00},
-	{0x084F, 0x1F},
-	{0x0850, 0x00},
-	{0x0851, 0x19},
-	{0x0852, 0x00},
-	{0x0853, 0x33},
-	{0x0854, 0x00},
-	{0x0855, 0x29},
-	{0x0858, 0x00},
-	{0x0859, 0x1F},
+	{0x0808, 0x00},
+	// {0x084E, 0x00},
+	// {0x084F, 0x1F},
+	// {0x0850, 0x00},
+	// {0x0851, 0x19},
+	// {0x0852, 0x00},
+	// {0x0853, 0x33},
+	// {0x0854, 0x00},
+	// {0x0855, 0x29},
+	// {0x0858, 0x00},
+	// {0x0859, 0x1F},
 
 	{REG_NULL, 0x00},
 };
