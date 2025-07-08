@@ -5,6 +5,8 @@
  *      Guochun Huang <hero.huang@rock-chips.com>
  */
 
+#include "linux/dev_printk.h"
+#include "linux/stddef.h"
 #include <linux/clk.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
@@ -887,6 +889,7 @@ struct samsung_mipi_dphy_timing samsung_mipi_dphy_timing_table[] = {
 	{  80,  2,   0,  0, 28,  5,  0, 22,  2,  0,  5},
 };
 
+//samsung_mipi_cphy_timing_table is for Tx
 static const
 struct samsung_mipi_cphy_timing samsung_mipi_cphy_timing_table[] = {
 	{ 3500, 39, 50, 25, 29, 54, 1 },
@@ -1263,7 +1266,7 @@ static const struct hsfreq_range samsung_dphy_rx_hsfreq_ranges[] = {
 	{3410, 0x012}, {3570, 0x013}, {3740, 0x014}, {3890, 0x015},
 	{4070, 0x016}, {4240, 0x017}, {4400, 0x018}, {4500, 0x019},
 };
-
+//samsung_cphy_rx_hsfreq_ranges is for rx
 /* These tables must be sorted by .range_h ascending. */
 static const struct hsfreq_range samsung_cphy_rx_hsfreq_ranges[] = {
 	{ 500,  0x102}, { 990, 0x002}, { 2500, 0x001},
@@ -1291,9 +1294,15 @@ static void samsung_mipi_dcphy_bias_block_enable(struct samsung_mipi_dcphy *sams
 	 * dphy: 400mv
 	 * cphy: 530mv
 	 */
+	samsung->c_option = 1;
 	if (samsung->c_option)
 		regmap_update_bits(samsung->regmap, BIAS_CON4,
 				   I_MUX_SEL_MASK, I_MUX_SEL(2));
+
+	dev_err(samsung->dev,
+			"rx bias block enable, lp_vol_ref = %d, c_option = %d\n",
+			csi_dphy ? csi_dphy->dphy_param.lp_vol_ref : 0,
+			samsung->c_option);
 }
 
 static void samsung_mipi_dcphy_bias_block_disable(struct samsung_mipi_dcphy *samsung)
@@ -1453,6 +1462,9 @@ samsung_mipi_cphy_get_timing(struct samsung_mipi_dcphy *samsung)
 	if (i == 0)
 		++i;
 
+	dev_info(samsung->dev, "%s: lane_msps: %u, timing[%u]: %u\n",
+		__func__, lane_msps, i - 1, timings[i - 1].max_lane_msps);
+
 	return &timings[i - 1];
 }
 
@@ -1499,6 +1511,11 @@ static void samsung_mipi_cphy_timing_init(struct samsung_mipi_dcphy *samsung)
 	regmap_write(samsung->regmap, COMBO_MD2_TIME_CON4, 0x1f4);
 
 	/* set T_ERR_SOT_SYNC default value */
+
+	dev_info(samsung->dev, "%s: lane_hs_rate: %u, lpx: %u, prebegin_3: %u, prepare_3: %u, hs_exit: %u, post_3: %u\n",
+		 __func__, lane_hs_rate, timing->lpx,
+		 timing->prebegin_3, timing->prepare_3,
+		 timing->hs_exit, timing->post_3);
 }
 
 static unsigned long
@@ -1515,7 +1532,9 @@ samsung_mipi_dcphy_pll_round_rate(struct samsung_mipi_dcphy *samsung,
 	u8 _scaler, best_scaler = 0;
 	u32 min_delta = UINT_MAX;
 	long _dsm, best_dsm = 0;
-
+	
+	dev_dbg(samsung->dev, "%s: max_fout: %llu, prate: %lu, rate: %lu\n",
+		__func__, max_fout, prate, rate);
 	/*
 	 * The PLL output frequency can be calculated using a simple formula:
 	 * Fvco = ((m+k/65536) x 2 x Fin) / p
@@ -1714,6 +1733,8 @@ static void samsung_mipi_dphy_power_on(struct samsung_mipi_dcphy *samsung)
 	 * at initial calibration.
 	 */
 	usleep_range(100, 110);
+
+	dev_err(samsung->dev, "[HAYDEN] MIPI DPHY power on done, undesired!!!\n");
 }
 
 static void samsung_mipi_cphy_power_on(struct samsung_mipi_dcphy *samsung)
@@ -1729,6 +1750,8 @@ static void samsung_mipi_cphy_power_on(struct samsung_mipi_dcphy *samsung)
 	samsung_mipi_cphy_lane_enable(samsung);
 
 	reset_control_deassert(samsung->m_phy_rst);
+
+	dev_dbg(samsung->dev, "[HAYDEN] MIPI CPHY power on done\n");
 }
 
 static struct v4l2_subdev *get_remote_sensor(struct v4l2_subdev *sd);
@@ -1764,6 +1787,9 @@ static int samsung_mipi_dcphy_power_on(struct phy *phy)
 	default:
 		samsung_mipi_cphy_power_on(samsung);
 	}
+	dev_info(samsung->dev, "[HAYDEN] %s: mode=%d, lanes=%d, rate=%llu\n",
+		__func__, mode, samsung->lanes, samsung->pll.rate);
+
 
 	return 0;
 }
@@ -1780,6 +1806,9 @@ static int samsung_mipi_dcphy_power_off(struct phy *phy)
 	default:
 		samsung_mipi_cphy_lane_disable(samsung);
 	}
+	dev_err(samsung->dev, "[HAYDEN] %s: mode=%d, lanes=%d, rate=%llu\n",
+		__func__, mode, samsung->lanes, samsung->pll.rate);
+
 
 	samsung_mipi_dcphy_pll_disable(samsung);
 	samsung_mipi_dcphy_bias_block_disable(samsung);
@@ -1891,6 +1920,9 @@ static int samsung_mipi_dcphy_configure(struct phy *phy,
 
 	samsung->c_option = (mode == PHY_MODE_MIPI_DPHY) ? false : true;
 
+	dev_info(samsung->dev, "[HAYDEN] %s: target_rate=%llu, mode=%d, c_option=%d\n",
+		__func__, target_rate, mode, samsung->c_option);
+
 	samsung->lanes = opts->mipi_dphy.lanes > 4 ? 4 : opts->mipi_dphy.lanes;
 
 	samsung_mipi_dcphy_pll_calc_rate(samsung, target_rate);
@@ -1935,15 +1967,18 @@ static void samsung_dcphy_rx_config_settle(struct csi2_dphy *dphy,
 	int num_hsfreq_ranges = 0;
 	int i, hsfreq = 0;
 	u32 sot_sync = 0;
-
+	dev_info(dphy->dev, "[HAYDEN] %s: sensor->mbus.type=%d, sensor->lanes=%d, dphy->data_rate_mbps=%lld\n",
+		__func__, sensor->mbus.type, sensor->lanes, dphy->data_rate_mbps);
 	if (sensor->mbus.type == V4L2_MBUS_CSI2_DPHY) {
 		hsfreq_ranges = samsung_dphy_rx_hsfreq_ranges;
 		num_hsfreq_ranges = ARRAY_SIZE(samsung_dphy_rx_hsfreq_ranges);
 		sot_sync = 0x03;
+		dev_info(dphy->dev, "[HAYDEN] %s: sensor->mbus.type DPHY is undesired!!!\n", __func__);
 	} else if (sensor->mbus.type == V4L2_MBUS_CSI2_CPHY) {
 		hsfreq_ranges = samsung_cphy_rx_hsfreq_ranges;
 		num_hsfreq_ranges = ARRAY_SIZE(samsung_cphy_rx_hsfreq_ranges);
 		sot_sync = 0x32;
+		dev_info(dphy->dev, "[HAYDEN] %s: sensor->mbus.type CPHY is good\n", __func__);
 	} else {
 		dev_err(dphy->dev, "mbus type %d is not support",
 			sensor->mbus.type);
@@ -1965,24 +2000,38 @@ static void samsung_dcphy_rx_config_settle(struct csi2_dphy *dphy,
 	}
 	/*clk settle fix to 0x301*/
 	if (sensor->mbus.type == V4L2_MBUS_CSI2_DPHY)
+	{
 		regmap_write(samsung->regmap, RX_CLK_THS_SETTLE, 0x301);
+		dev_err(dphy->dev, "[HAYDEN] %s: RX_CLK_THS_SETTLE set to 0x301, undesired!!!\n", __func__);
+	}
 
 	if (sensor->lanes > 0x00) {
 		regmap_update_bits(samsung->regmap, RX_LANE0_THS_SETTLE, 0x1ff, hsfreq);
 		regmap_update_bits(samsung->regmap, RX_LANE0_ERR_SOT_SYNC, 0xff, sot_sync);
+		dev_info(dphy->dev, "[HAYDEN] %s: lane0 rx timing config done, hsfreq=%d, sot_sync=0x%x\n",
+			__func__, hsfreq, sot_sync);
 	}
 	if (sensor->lanes > 0x01) {
 		regmap_update_bits(samsung->regmap, RX_LANE1_THS_SETTLE, 0x1ff, hsfreq);
 		regmap_update_bits(samsung->regmap, RX_LANE1_ERR_SOT_SYNC, 0xff, sot_sync);
+		dev_info(dphy->dev, "[HAYDEN] %s: lane1 rx timing config done, hsfreq=%d, sot_sync=0x%x\n",
+			__func__, hsfreq, sot_sync);
 	}
 	if (sensor->lanes > 0x02) {
 		regmap_update_bits(samsung->regmap, RX_LANE2_THS_SETTLE, 0x1ff, hsfreq);
 		regmap_update_bits(samsung->regmap, RX_LANE2_ERR_SOT_SYNC, 0xff, sot_sync);
+		dev_info(dphy->dev, "[HAYDEN] %s: lane2 rx timing config done, hsfreq=%d, sot_sync=0x%x\n",
+			__func__, hsfreq, sot_sync);
 	}
 	if (sensor->lanes > 0x03) {
 		regmap_update_bits(samsung->regmap, RX_LANE3_THS_SETTLE, 0x1ff, hsfreq);
 		regmap_update_bits(samsung->regmap, RX_LANE3_ERR_SOT_SYNC, 0xff, sot_sync);
+		dev_info(dphy->dev, "[HAYDEN] %s: lane3 rx timing config done, hsfreq=%d, sot_sync=0x%x undesired!!!\n",
+			__func__, hsfreq, sot_sync);
 	}
+	dev_info(dphy->dev, "[HAYDEN] %s: STEP3 rx timing config done, hsfreq=%d, sot_sync=0x%x\n",
+		__func__, hsfreq, sot_sync);
+
 }
 
 static int samsung_dcphy_rx_config_common(struct csi2_dphy *dphy,
@@ -2128,16 +2177,33 @@ static int samsung_dcphy_rx_lane_enable(struct csi2_dphy *dphy,
 	int ret = 0;
 
 	if (sensor->mbus.type == V4L2_MBUS_CSI2_DPHY)
+	{
 		regmap_update_bits(samsung->regmap, RX_CLK_LANE_ENABLE, PHY_ENABLE, PHY_ENABLE);
-
+		dev_info(dphy->dev, "[HAYDEN] %s: RX_CLK_LANE_ENABLE, PHY_ENABLE, undesired!!!\n", __func__);
+	}
 	if (sensor->lanes > 0x00)
+	{
 		regmap_update_bits(samsung->regmap, RX_DATA_LANE0_ENABLE, PHY_ENABLE, PHY_ENABLE);
+		dev_info(dphy->dev, "[HAYDEN] %s: RX_DATA_LANE0_ENABLE, PHY_ENABLE, good\n", __func__);
+	}
 	if (sensor->lanes > 0x01)
+	{
 		regmap_update_bits(samsung->regmap, RX_DATA_LANE1_ENABLE, PHY_ENABLE, PHY_ENABLE);
+		dev_info(dphy->dev, "[HAYDEN] %s: RX_DATA_LANE1_ENABLE, PHY_ENABLE, good\n", __func__);
+	}
 	if (sensor->lanes > 0x02)
+	{
 		regmap_update_bits(samsung->regmap, RX_DATA_LANE2_ENABLE, PHY_ENABLE, PHY_ENABLE);
+		dev_info(dphy->dev, "[HAYDEN] %s: RX_DATA_LANE2_ENABLE, PHY_ENABLE, good\n", __func__);
+	}
 	if (sensor->lanes > 0x03)
+	{
 		regmap_update_bits(samsung->regmap, RX_DATA_LANE3_ENABLE, PHY_ENABLE, PHY_ENABLE);
+		dev_info(dphy->dev, "[HAYDEN] %s: RX_DATA_LANE3_ENABLE, PHY_ENABLE, undesired!!!\n", __func__);
+	}
+
+	dev_info(dphy->dev, "[HAYDEN] %s: STEP4 rx lane enable done, sensor->mbus.type=%d, sensor->lanes=%d\n",
+		__func__, sensor->mbus.type, sensor->lanes);
 
 	/*wait for clk lane ready*/
 	if (sensor->mbus.type == V4L2_MBUS_CSI2_DPHY) {
@@ -2157,6 +2223,7 @@ static int samsung_dcphy_rx_lane_enable(struct csi2_dphy *dphy,
 			dev_err(samsung->dev, "phy rx data lane 0 is not locked\n");
 			return -EINVAL;
 		}
+		dev_info(dphy->dev, "[HAYDEN] %s: RX_DATA_LANE0_ENABLE is locked\n", __func__);
 	}
 	if (sensor->lanes > 0x01) {
 		ret = regmap_read_poll_timeout(samsung->regmap, RX_DATA_LANE1_ENABLE,
@@ -2165,6 +2232,7 @@ static int samsung_dcphy_rx_lane_enable(struct csi2_dphy *dphy,
 			dev_err(samsung->dev, "phy rx data lane 1 is not locked\n");
 			return -EINVAL;
 		}
+		dev_info(dphy->dev, "[HAYDEN] %s: RX_DATA_LANE1_ENABLE is locked\n", __func__);
 	}
 	if (sensor->lanes > 0x02) {
 		ret = regmap_read_poll_timeout(samsung->regmap, RX_DATA_LANE2_ENABLE,
@@ -2173,6 +2241,7 @@ static int samsung_dcphy_rx_lane_enable(struct csi2_dphy *dphy,
 			dev_err(samsung->dev, "phy rx data lane 2 is not locked\n");
 			return -EINVAL;
 		}
+		dev_info(dphy->dev, "[HAYDEN] %s: RX_DATA_LANE2_ENABLE is locked\n", __func__);
 	}
 
 	if (sensor->lanes > 0x03) {
@@ -2182,7 +2251,11 @@ static int samsung_dcphy_rx_lane_enable(struct csi2_dphy *dphy,
 			dev_err(samsung->dev, "phy rx data lane 3 is not locked\n");
 			return -EINVAL;
 		}
+		dev_info(dphy->dev, "[HAYDEN] %s: RX_DATA_LANE3_ENABLE is locked\n", __func__);
 	}
+
+	dev_info(dphy->dev, "[HAYDEN] %s: STEP5 rx lane enable check done, sensor->mbus.type=%d, sensor->lanes=%d\n",
+		__func__, sensor->mbus.type, sensor->lanes);
 	return 0;
 }
 
@@ -2193,6 +2266,7 @@ static int samsung_dcphy_rx_stream_on(struct csi2_dphy *dphy,
 	struct csi2_sensor *sensor;
 	struct samsung_mipi_dcphy *samsung = dphy->samsung_phy;
 	int ret = 0;
+	u32 sts;
 
 	if (!sensor_sd)
 		return -ENODEV;
@@ -2202,10 +2276,27 @@ static int samsung_dcphy_rx_stream_on(struct csi2_dphy *dphy,
 
 	mutex_lock(&samsung->mutex);
 	if (sensor->mbus.type == V4L2_MBUS_CSI2_CPHY)
+	{
 		regmap_write(samsung->grf_regmap, MIPI_DCPHY_GRF_CON0, S_CPHY_MODE);
+		// readback to check if it is 0x09
+		ret = regmap_read(samsung->grf_regmap, MIPI_DCPHY_GRF_CON0, &sts);
+		if (ret < 0) {
+			dev_err(dphy->dev, "[HAYDEN] %s: failed to read MIPI_DCPHY_GRF_CON0\n", __func__);
+		}
+		dev_info(dphy->dev, "[HAYDEN] %s: MIPI_CPHY_MODE is good, MIPI_DCPHY_GRF_CON0=0x%x expected 0x09\n",
+			__func__, sts);
+	}
 
+	dev_info(dphy->dev, "[HAYDEN] %s: STEP1 sensor->mbus.type=%d, sensor->lanes=%d, dphy->data_rate_mbps=%lld\n",
+		__func__, sensor->mbus.type, sensor->lanes, dphy->data_rate_mbps);
 	if (samsung->s_phy_rst)
+	{
 		reset_control_assert(samsung->s_phy_rst);
+		dev_info(dphy->dev, "[HAYDEN] %s: s_phy_rst assert STEP2\n", __func__);
+	}
+	else {
+		dev_err(dphy->dev, "[HAYDEN] %s: s_phy_rst is NULL STEP2 FAIL\n", __func__);
+	}
 
 	samsung_mipi_dcphy_bias_block_enable(samsung, dphy);
 	ret = samsung_dcphy_rx_config_common(dphy, sensor);
@@ -2218,7 +2309,13 @@ static int samsung_dcphy_rx_stream_on(struct csi2_dphy *dphy,
 		goto out_streamon;
 
 	if (samsung->s_phy_rst)
+	{
 		reset_control_deassert(samsung->s_phy_rst);
+		dev_info(dphy->dev, "[HAYDEN] %s: s_phy_rst deassert STEP6\n", __func__);
+	}
+	else {
+		dev_err(dphy->dev, "[HAYDEN] %s: s_phy_rst is NULL STEP6 FAIL\n", __func__);
+	}
 
 	atomic_inc(&samsung->stream_cnt);
 	mutex_unlock(&samsung->mutex);

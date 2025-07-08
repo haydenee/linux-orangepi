@@ -110,10 +110,10 @@
 	};
 };
 
-&display_subsystem {
-	memory-region = <&drm_logo>;
-	memory-region-names = "drm-logo";
-};
+// &display_subsystem {
+// 	memory-region = <&drm_logo>;
+// 	memory-region-names = "drm-logo";
+// };
 
 &dfi {
 	status = "okay";

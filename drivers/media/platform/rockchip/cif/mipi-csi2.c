@@ -900,7 +900,8 @@ static irqreturn_t rk_csirx_irq2_handler(int irq, void *ctx)
 			csi2_err_strncat(err_str, cur_str);
 		}
 
-		pr_err("%s ERR2:0x%x %s\n", csi2_hw->dev_name, val, err_str);
+		// pr_err("%s ERR2:0x%x %s\n", csi2_hw->dev_name, val, err_str);
+		// temporary disable irq to avoid too many error logs
 	}
 
 	return IRQ_HANDLED;

@@ -41,15 +41,12 @@
 #define V4L2_CID_DIGITAL_GAIN		V4L2_CID_GAIN
 #endif
 
-#define IMX989_MIPI_FREQ_356M			356000000
-#define IMX989_MIPI_FREQ_384M			384000000
-#define IMX989_MIPI_FREQ_750M			750000000
 #define IMX989_MIPI_FREQ_1250M			1250000000
 
 #define IMX989_LANES			3
 
-#define PIXEL_RATE_WITH_1250M_10BIT	((u64)IMX989_MIPI_FREQ_356M * 2  * 4 / 10)
-#define PIXEL_RATE_WITH_1250M_12BIT	((u64)IMX989_MIPI_FREQ_356M * 2  * 4 / 12)
+#define PIXEL_RATE_WITH_1250M_10BIT	((u64)IMX989_MIPI_FREQ_1250M * 2  * 4 / 10)
+#define PIXEL_RATE_WITH_1250M_12BIT	((u64)IMX989_MIPI_FREQ_1250M * 2  * 4 / 12)
 
 #define IMX989_XVCLK_FREQ		19200000
 
@@ -829,7 +826,7 @@ static const struct imx989_mode supported_modes[] = {
 			.numerator = 10000,
 			.denominator = 300000,
 		},
-		.exp_def = 0x2f40,
+		.exp_def = 0x2000,
 		.hts_def = 0x2ba0,//11168
 		.vts_def = 0x2f70,//12144
 		.bus_fmt = MEDIA_BUS_FMT_SRGGB10_1X10,
@@ -838,15 +835,12 @@ static const struct imx989_mode supported_modes[] = {
 		.spd = &imx989_spd,
 		.ebd = &imx989_ebd,
 		.hdr_mode = NO_HDR,
-		.mipi_freq_idx = 3,
+		.mipi_freq_idx = 0,
 		.vc[PAD0] = 0,
 	},
 };
 
 static const s64 link_freq_items[] = {
-	IMX989_MIPI_FREQ_356M,
-	IMX989_MIPI_FREQ_384M,
-	IMX989_MIPI_FREQ_750M,
 	IMX989_MIPI_FREQ_1250M,
 };
 static const char * const imx989_test_pattern_menu[] = {
@@ -959,6 +953,7 @@ static int imx989_write_array(struct i2c_client *client,
 					       IMX989_REG_VALUE_08BIT,
 					       regs[i].val);
 
+	dev_err(&client->dev, "%s: i=%d, ret=%d\n", __func__, i, ret);
 	return ret;
 }
 
@@ -1147,9 +1142,13 @@ static int imx989_g_mbus_config(struct v4l2_subdev *sd, unsigned int pad_id,
 {
 	struct imx989 *imx989 = to_imx989(sd);
 	
-	config->type = imx989->bus_cfg.bus_type;
+	// config->type = imx989->bus_cfg.bus_type;
+	config->type = V4L2_MBUS_CSI2_CPHY;
 	config->bus.mipi_csi2 = imx989->bus_cfg.bus.mipi_csi2;
-
+	dev_info(&imx989->client->dev,
+	       "[HAYDEN] %s: pad_id=%d, type=%d, num_data_lanes=%d\n",
+	       __func__, pad_id, config->type,
+	       config->bus.mipi_csi2.num_data_lanes);
 	return 0;
 }
 
@@ -1530,6 +1529,15 @@ static int __imx989_start_stream(struct imx989 *imx989)// really apply the mode
 	}
 
 	imx989_set_flip(imx989);
+
+	dev_err(&imx989->client->dev,
+		"%s: %dx%d@%d, hts: %d, vts: %d, exp: %d\n",
+		__func__, imx989->cur_mode->width,
+		imx989->cur_mode->height,
+		DIV_ROUND_CLOSEST(imx989->cur_mode->max_fps.denominator,
+				  imx989->cur_mode->max_fps.numerator),
+		imx989->cur_mode->hts_def, imx989->cur_vts,
+		imx989->cur_mode->exp_def);
 
 	return imx989_write_reg(imx989->client, IMX989_REG_CTRL_MODE,
 				IMX989_REG_VALUE_08BIT, IMX989_MODE_STREAMING);

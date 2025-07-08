@@ -167,6 +167,7 @@ static int rockchip_csi2_dphy_attach_hw(struct csi2_dphy *dphy, int csi_idx, int
 			dphy->phy_hw[index] = (void *)dcphy_hw;
 			dphy->dphy_param = rk3588_dcphy_param;
 			dphy->csi_info.dphy_vendor[index] = PHY_VENDOR_SAMSUNG;
+			dev_info(dphy->dev, "[HAYDEN] csi%d attach samsung dcphy\n", csi_idx);
 		} else {
 			dphy_hw = dphy->dphy_hw_group[(csi_idx - 2) / 2];
 			mutex_lock(&dphy_hw->mutex);
@@ -251,6 +252,10 @@ static int rockchip_csi2_dphy_attach_hw(struct csi2_dphy *dphy, int csi_idx, int
 		dphy->csi_info.dphy_vendor[index] = PHY_VENDOR_INNO;
 		mutex_unlock(&dphy_hw->mutex);
 	}
+
+	dev_info(dphy->dev, "[HAYDEN] csi%d dphy%d attach hw %d %d\n",
+			csi_idx, dphy->phy_index,
+			dphy->csi_info.dphy_vendor[index] , dphy->lane_mode);
 
 	return 0;
 }
@@ -861,7 +866,7 @@ static int rockchip_csi2_dphy_fwnode_parse(struct csi2_dphy *dphy)
 	struct v4l2_mbus_config *config = NULL;
 	struct fwnode_handle *remote_ep = NULL;
 	struct v4l2_fwnode_endpoint vep = {
-		.bus_type = V4L2_MBUS_CSI2_DPHY
+		.bus_type = V4L2_MBUS_CSI2_CPHY
 	};
 	struct device *remote_dev = NULL;
 	int ret;
@@ -872,10 +877,10 @@ static int rockchip_csi2_dphy_fwnode_parse(struct csi2_dphy *dphy)
 			goto err_parse;
 
 		/* only add fwnode form port 0 to notifier list */
-		if (vep.base.port != 0)
+		if (vep.base.port != 0) // port0
 			continue;
 
-		remote_ep = fwnode_graph_get_remote_port_parent(ep);
+		remote_ep = fwnode_graph_get_remote_port_parent(ep); // find the sensor
 
 		/* skip device dts status is disabled */
 		if (!fwnode_device_is_available(remote_ep)) {
@@ -911,6 +916,8 @@ static int rockchip_csi2_dphy_fwnode_parse(struct csi2_dphy *dphy)
 			config->type = vep.bus_type;
 			config->bus.mipi_csi2.flags = vep.bus.mipi_csi2.flags;
 			s_asd->lanes = vep.bus.mipi_csi2.num_data_lanes;
+			dev_info(dev, "[HAYDEN] CSI2 bus type %d, lanes %d, 6 is cphy\n",
+				vep.bus_type, s_asd->lanes);
 		} else if (vep.bus_type == V4L2_MBUS_CCP2) {
 			/* V4L2_MBUS_CCP2 for lvds */
 			config->type = V4L2_MBUS_CCP2;
@@ -1030,6 +1037,7 @@ static int rockchip_csi2_dphy_get_samsung_phy_hw(struct csi2_dphy *dphy)
 		dcphy_hw = phy_get_drvdata(dcphy);
 		dphy->samsung_phy_group[i] = dcphy_hw;
 	}
+	dev_info(dev, "[HAYDEN] %s: num_samsung_phy=%d\n", __func__, dphy->drv_data->num_samsung_phy);
 	return 0;
 }
 

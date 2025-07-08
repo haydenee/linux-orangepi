@@ -10,9 +10,9 @@
 #include "rk3588-linux.dtsi"
 #include "rk3588s-orangepi-5-lcd.dtsi"
 
-#include "rk3588s-orangepi-5-camera1.dtsi"
-#include "rk3588s-orangepi-5-camera2.dtsi"
-#include "rk3588s-orangepi-5-camera3.dtsi"
+// #include "rk3588s-orangepi-5-camera1.dtsi"
+// #include "rk3588s-orangepi-5-camera2.dtsi"
+// #include "rk3588s-orangepi-5-camera3.dtsi"
 
 / {
 	model = "Orange Pi 5";
@@ -451,6 +451,133 @@
 		leds_gpio: leds-gpio {
 			rockchip,pins =
 				<1 RK_PA2 RK_FUNC_GPIO &pcfg_pull_none>;
+		};
+	};
+};
+&csi2_dcphy0 {
+	status = "okay";
+
+	ports {
+		#address-cells = <1>;
+		#size-cells = <0>;
+		port@0 {
+			reg = <0>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			mipi_in_ucam0: endpoint@1 {
+				reg = <1>;
+				remote-endpoint = <&imx989_out0>;
+				bus-type = <1>;
+				data-lanes = <1 2 3>;
+			};
+		};
+		port@1 {
+			reg = <1>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			csidcphy0_out: endpoint@1 {
+				reg = <1>;
+				remote-endpoint = <&mipi0_csi2_input>;
+			};
+		};
+	};
+};
+
+&i2c7 {
+	status = "okay";
+	pinctrl-names = "default";
+	pinctrl-0 = <&i2c7m0_xfer>;
+
+	imx989: imx989@10 {
+		compatible = "sony,imx989";
+		reg = <0x10>;
+		clocks = <&cru CLK_MIPI_CAMARAOUT_M4>;
+		clock-names = "xvclk";
+		power-domains = <&power RK3588_PD_VI>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&mipim0_camera4_clk>;
+		// power-gpios = <&gpio1 RK_PB3 GPIO_ACTIVE_HIGH>;
+		reset-gpios = <&gpio1 RK_PB2 GPIO_ACTIVE_HIGH>;
+		//pwdn-gpios = <&gpio1 RK_PA0 GPIO_ACTIVE_HIGH>;
+		rockchip,camera-module-index = <0>;
+		rockchip,camera-module-facing = "back";
+		rockchip,camera-module-name = "default";
+		rockchip,camera-module-lens-name = "default";
+		// lens-focus = <&fp5510>;
+		
+		port {
+			imx989_out0: endpoint {
+				remote-endpoint = <&mipi_in_ucam0>;
+				bus-type = <1>;
+				data-lanes = <1 2 3>;
+			};
+		};
+	};
+};
+
+&mipi0_csi2 {
+	status = "okay";
+
+	ports {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		port@0 {
+			reg = <0>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			mipi0_csi2_input: endpoint@1 {
+				reg = <1>;
+				remote-endpoint = <&csidcphy0_out>;
+			};
+		};
+
+		port@1 {
+			reg = <1>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			mipi0_csi2_output: endpoint@0 {
+				reg = <0>;
+				remote-endpoint = <&cif_mipi_in0>;
+			};
+		};
+	};
+};
+
+&rkcif_mipi_lvds {
+	status = "okay";
+
+	port {
+		cif_mipi_in0: endpoint {
+			remote-endpoint = <&mipi0_csi2_output>;
+		};
+	};
+};
+
+&rkcif_mipi_lvds_sditf {
+	status = "okay";
+
+	port {
+		mipi_lvds_sditf: endpoint {
+			remote-endpoint = <&isp0_vir0>;
+		};
+	};
+};
+
+&rkisp0_vir0 {
+	status = "okay";
+
+	port {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		isp0_vir0: endpoint@0 {
+			reg = <0>;
+			remote-endpoint = <&mipi_lvds_sditf>;
 		};
 	};
 };
