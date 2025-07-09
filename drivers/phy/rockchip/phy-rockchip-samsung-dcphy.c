@@ -2277,7 +2277,7 @@ static int samsung_dcphy_rx_stream_on(struct csi2_dphy *dphy,
 	mutex_lock(&samsung->mutex);
 	if (sensor->mbus.type == V4L2_MBUS_CSI2_CPHY)
 	{
-		regmap_write(samsung->grf_regmap, MIPI_DCPHY_GRF_CON0, S_CPHY_MODE);
+		regmap_write(samsung->grf_regmap, MIPI_DCPHY_GRF_CON0, S_CPHY_MODE|M_CPHY_MODE);
 		// readback to check if it is 0x09
 		ret = regmap_read(samsung->grf_regmap, MIPI_DCPHY_GRF_CON0, &sts);
 		if (ret < 0) {

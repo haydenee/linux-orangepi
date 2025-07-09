@@ -288,6 +288,7 @@ static int csi2_s_stream(struct v4l2_subdev *sd, int enable)
 {
 	struct csi2_dev *csi2 = sd_to_dev(sd);
 	int ret = 0;
+	u32 val;
 
 	mutex_lock(&csi2->lock);
 
@@ -295,6 +296,7 @@ static int csi2_s_stream(struct v4l2_subdev *sd, int enable)
 		enable ? "on" : "off",
 		csi2->src_sd, csi2->src_sd->name);
 
+	
 	/*
 	 * enable/disable streaming only if stream_count is
 	 * going from 0 to 1 / 1 to 0.
@@ -304,8 +306,16 @@ static int csi2_s_stream(struct v4l2_subdev *sd, int enable)
 
 	dev_err(csi2->dev, "stream %s\n", enable ? "ON" : "OFF");
 
-	if (enable)
+	if (enable){
 		ret = csi2_start(csi2);
+		if (ret==0){
+			//read_csihost_reg CSI2HOST_CONTROL to check mode
+			val = read_csihost_reg(csi2->csi2_hw[0]->base, CSIHOST_CONTROL);
+			dev_err(csi2->dev, "CSI2HOST_CONTROL: 0x%x\n", val);
+			//bit 0 indicates cphy or dphy, 1 for cphy. log this
+			dev_err(csi2->dev, "CSI2HOST_CONTROL: %s\n", (val & 0x1) ? "CPHY" : "DPHY");
+		}
+	}
 	else
 		csi2_stop(csi2);
 	if (ret)
@@ -900,7 +910,7 @@ static irqreturn_t rk_csirx_irq2_handler(int irq, void *ctx)
 			csi2_err_strncat(err_str, cur_str);
 		}
 
-		// pr_err("%s ERR2:0x%x %s\n", csi2_hw->dev_name, val, err_str);
+		pr_err("%s ERR2:0x%x %s\n", csi2_hw->dev_name, val, err_str);
 		// temporary disable irq to avoid too many error logs
 	}
 
